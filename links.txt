@@ -1,0 +1,11 @@
+ "https://en.wikipedia.org/wiki/Embedding_(machine_learning)",
+        "https://www.ibm.com/think/topics/embedding",
+        "https://en.wikipedia.org/wiki/BERT_(language_model)",
+        "https://en.wikipedia.org/wiki/Word2vec",
+        "https://sbert.net/",
+        "https://huggingface.co/sentence-transformers",
+        "https://en.wikipedia.org/wiki/Machine_learning",
+        "https://www.ibm.com/think/topics/machine-learning",
+        "https://aws.amazon.com/what-is/embeddings-in-machine-learning/",
+        "https://developers.google.com/machine-learning/crash-course/embeddings/embedding-space",
+        "https://www.cloudflare.com/learning/ai/what-are-embeddings/"
