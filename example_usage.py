@@ -1,479 +1,623 @@
 """
-RAG System - Complete Usage Examples
+Complete Usage Examples for Production RAG System
 
-This file demonstrates all features of the Phase 1+2 RAG system.
+This file demonstrates all features of the RAG system:
+1. Building collections from sources
+2. Searching with different modes
+3. Using results for NLP pipelines
+4. Analytics and result tracking
+5. Python API usage
+
+Run examples:
+    python example_usage.py --example 1  # Build collection
+    python example_usage.py --example 2  # Basic search
+    python example_usage.py --example 3  # Parallel search 
+    python example_usage.py --example 4  # NLP integration
+    python example_usage.py --example 5  # Advanced usage
+    python example_usage.py --all         # Run all examples
 """
 
+import json
+import argparse
+from pathlib import Path
+
 from core.extraction import DocumentExtractor
-from core.chunking import Chunker, ChunkingConfig
 from core.search import ChromaDBManager, UnifiedSearchEngine, load_documents_from_json
-from main import RAGPipeline
-from config.settings import print_config_summary
 from utils.logger import get_logger
 
-logger = get_logger("example")
+logger = get_logger("examples")
 
 
-# =============================================================================
-# EXAMPLE 1: Quick Start - Full Pipeline
-# =============================================================================
+# ============================================================================
+# EXAMPLE 1: Building a Collection from Scratch
+# ============================================================================
 
-def example_1_quick_start():
+def example_1_build_collection():
     """
-    Simplest way to use the system: Extract → Index → Search
-    """
-    print("\n" + "="*70)
-    print("EXAMPLE 1: Quick Start - Full Pipeline")
-    print("="*70)
+    Example 1: Extract documents and build searchable collection
     
-    pipeline = RAGPipeline()
-    
-    # Process URLs and get search engine
-    search_engine = pipeline.run_full_pipeline(
-        sources=[
-            "https://en.wikipedia.org/wiki/Machine_learning",
-            "https://en.wikipedia.org/wiki/Deep_learning"
-        ],
-        chunk=True,
-        use_scrapy=False,  # Use BeautifulSoup (more reliable)
-        reset_db=True  # Start fresh
-    )
-    
-    # Search
-    results = search_engine.search("What is machine learning?", n_results=3)
-    
-    print("\n📊 Top 3 Results:")
-    for result in results:
-        print(f"\n[{result['rank']}] Score: {result['final_score']:.3f}")
-        print(f"    {result['content'][:200]}...")
-
-
-# =============================================================================
-# EXAMPLE 2: Extract Documents Only
-# =============================================================================
-
-def example_2_extraction_only():
-    """
-    Extract and save documents without indexing
+    This example shows how to:
+    - Extract from web sources and files
+    - Chunk documents automatically
+    - Index into ChromaDB
+    - Save for later use
     """
     print("\n" + "="*70)
-    print("EXAMPLE 2: Extraction Only")
+    print("EXAMPLE 1: Building Collection from Sources")
     print("="*70)
     
+    # Initialize extractor
     extractor = DocumentExtractor()
     
-    # Extract from multiple sources
+    # Define sources (mix of web and files)
+    sources = [
+        # Web sources
+        "https://en.wikipedia.org/wiki/Machine_learning",
+        "https://en.wikipedia.org/wiki/Artificial_intelligence",
+        
+        # File sources (uncomment if you have these files)
+        # "documents/research_paper.pdf",
+        # "documents/report.docx",
+        # "documents/data.csv",
+    ]
+    
+    # Extract documents with automatic chunking
+    print("\n📥 Step 1: Extracting documents...")
     documents = extractor.extract_multiple(
-        sources=[
-            "https://en.wikipedia.org/wiki/Artificial_intelligence",
-            "data/sample.pdf",  # Local file
-            "data/report.docx"
-        ],
-        chunk=True,
-        use_scrapy=False,
-        parallel=True  # Process files in parallel
+        sources=sources,
+        chunk=True,           # Enable smart chunking
+        use_scrapy=False,     # Use BeautifulSoup (more reliable)
+        parallel=True         # Process files in parallel
     )
     
-    print(f"\n✅ Extracted {len(documents)} document chunks")
+    print(f"✅ Extracted {len(documents)} chunks")
     
-    # Save to JSON
+    # Save extracted documents
+    print("\n💾 Step 2: Saving extracted documents...")
     extractor.save_documents(documents)
-    print("💾 Saved to data/extracted/")
+    print("✅ Saved to data/extracted/")
     
-    # Show document structure
-    if documents:
-        doc = documents[0]
-        print(f"\n📄 Sample Document Structure:")
-        print(f"   Content length: {len(doc.content)} chars")
-        print(f"   Document ID: {doc.document_id}")
-        print(f"   Chunk ID: {doc.chunk_id}")
-        print(f"   Metadata fields: {list(doc.metadata.keys())}")
-
-
-# =============================================================================
-# EXAMPLE 3: Custom Chunking Configuration
-# =============================================================================
-
-def example_3_custom_chunking():
-    """
-    Use different chunking strategies
-    """
-    print("\n" + "="*70)
-    print("EXAMPLE 3: Custom Chunking")
-    print("="*70)
-    
-    sample_text = """
-    Machine learning is a subset of artificial intelligence that focuses on 
-    teaching computers to learn from data. There are three main types of 
-    machine learning: supervised learning, unsupervised learning, and 
-    reinforcement learning.
-    
-    Supervised learning uses labeled data to train models. The algorithm 
-    learns to map inputs to outputs based on example input-output pairs.
-    
-    Unsupervised learning finds patterns in unlabeled data. It discovers 
-    hidden structures without explicit guidance.
-    
-    Reinforcement learning learns through trial and error. An agent learns 
-    to make decisions by receiving rewards or penalties.
-    """
-    
-    # Test different chunking methods
-    methods = ['sentence_aware', 'semantic', 'fixed_size', 'paragraph']
-    
-    for method in methods:
-        config = ChunkingConfig(
-            method=method,
-            target_words=50,  # Small chunks for demo
-            overlap_words=10
-        )
-        
-        chunker = Chunker(config)
-        chunks = chunker.chunk(sample_text)
-        
-        print(f"\n{method.upper()}:")
-        print(f"   Created {len(chunks)} chunks")
-        for i, chunk in enumerate(chunks, 1):
-            print(f"   Chunk {i}: {chunk.word_count} words")
-
-
-# =============================================================================
-# EXAMPLE 4: Search with Different Strategies
-# =============================================================================
-
-def example_4_search_strategies():
-    """
-    Compare different search strategies
-    """
-    print("\n" + "="*70)
-    print("EXAMPLE 4: Search Strategies")
-    print("="*70)
-    
-    # Initialize search engine (assumes database exists)
-    db_manager = ChromaDBManager()
-    collection = db_manager.create_collection(reset=False)
-    
-    if collection.count() == 0:
-        print("❌ Database is empty. Run example 1 first.")
-        return
-    
-    search_engine = UnifiedSearchEngine(db_manager, enable_routing=True)
-    
-    query = "How does deep learning work?"
-    
-    # Try different strategies
-    strategies = {
-        "semantic": {},
-        "hybrid": {"alpha": 0.7},
-        "mmr": {"lambda_param": 0.7},
-        "bm25_heavy": {"alpha": 0.3}
-    }
-    
-    for strategy, params in strategies.items():
-        print(f"\n{strategy.upper()}:")
-        results = search_engine.search(
-            query,
-            n_results=2,
-            strategy=strategy,
-            strategy_params=params
-        )
-        
-        for result in results:
-            print(f"  [{result['rank']}] Score: {result['final_score']:.3f}")
-            print(f"      {result['content'][:100]}...")
-
-
-# =============================================================================
-# EXAMPLE 5: Metadata Filtering
-# =============================================================================
-
-def example_5_metadata_filtering():
-    """
-    Search with metadata filters
-    """
-    print("\n" + "="*70)
-    print("EXAMPLE 5: Metadata Filtering")
-    print("="*70)
-    
-    db_manager = ChromaDBManager()
-    collection = db_manager.create_collection(reset=False)
-    
-    if collection.count() == 0:
-        print("❌ Database is empty. Run example 1 first.")
-        return
-    
-    # Search only PDF documents
-    results = db_manager.search(
-        query="machine learning algorithms",
-        n_results=5,
-        filters={"source_type": "pdf"}
+    # Initialize database
+    print("\n🔵 Step 3: Indexing into ChromaDB...")
+    db = ChromaDBManager()
+    collection = db.create_collection(
+        collection_name="ml_knowledge_base",
+        reset=True  # Reset if exists
     )
     
-    print(f"\n📄 Results from PDF documents only:")
-    for result in results:
-        print(f"  [{result['rank']}] {result['metadata'].get('filename', 'N/A')}")
-        print(f"      {result['content'][:100]}...")
+    # Prepare documents for indexing
+    docs_for_indexing = [
+        {
+            'id': doc.doc_id,
+            'content': doc.content,
+            'metadata': doc.metadata,
+            'document_id': doc.document_id
+        }
+        for doc in documents
+    ]
     
-    # Search specific chunk range
-    results = db_manager.search(
-        query="neural networks",
-        n_results=5,
-        filters={"chunk_index": {"$lte": 10}}  # First 10 chunks only
-    )
-    
-    print(f"\n📍 Results from first 10 chunks:")
-    for result in results:
-        print(f"  [{result['rank']}] Chunk {result['metadata'].get('chunk_index', 'N/A')}")
-
-
-# =============================================================================
-# EXAMPLE 6: Load Existing Documents and Index
-# =============================================================================
-
-def example_6_load_and_index():
-    """
-    Load previously extracted documents and index them
-    """
-    print("\n" + "="*70)
-    print("EXAMPLE 6: Load and Index Existing Documents")
-    print("="*70)
-    
-    # Load documents from JSON files
-    documents = load_documents_from_json("data/extracted")
-    
-    if not documents:
-        print("❌ No documents found in data/extracted/")
-        print("   Run example 2 first to extract documents.")
-        return
-    
-    print(f"📂 Loaded {len(documents)} documents")
-    
-    # Index them
-    db_manager = ChromaDBManager()
-    collection = db_manager.create_collection(reset=True)
-    db_manager.add_documents(documents)
+    # Add to database
+    db.add_documents(docs_for_indexing)
     
     print(f"✅ Indexed {collection.count()} documents")
-    
-    # Search
-    search_engine = UnifiedSearchEngine(db_manager)
-    results = search_engine.search("artificial intelligence", n_results=3)
-    
-    print("\n🔍 Search Results:")
-    for result in results:
-        print(f"  [{result['rank']}] {result['content'][:100]}...")
+    print("\n" + "="*70)
+    print("✅ COLLECTION BUILT SUCCESSFULLY!")
+    print("="*70)
+    print(f"Collection name: {collection.name}")
+    print(f"Total documents: {collection.count()}")
+    print(f"Ready for searching!")
+    print("="*70 + "\n")
 
 
-# =============================================================================
-# EXAMPLE 7: Batch Processing Multiple Files
-# =============================================================================
+# ============================================================================
+# EXAMPLE 2: Basic Search
+# ============================================================================
 
-def example_7_batch_processing():
+def example_2_basic_search():
     """
-    Process multiple files in parallel
+    Example 2: Simple semantic search
+    
+    Shows how to:
+    - Initialize search engine
+    - Perform basic searches
+    - View results with confidence scores
     """
     print("\n" + "="*70)
-    print("EXAMPLE 7: Batch Processing")
+    print("EXAMPLE 2: Basic Search")
+    print("="*70)
+    
+    # Initialize
+    db = ChromaDBManager()
+    db.create_collection(collection_name="ml_knowledge_base")
+    
+    # Check if collection has data
+    if db.collection.count() == 0:
+        print("\n⚠️  Collection is empty! Run Example 1 first to build collection.")
+        return
+    
+    # Initialize search engine
+    search_engine = UnifiedSearchEngine(
+        db,
+        confidence_threshold=0.3  # Minimum confidence score
+    )
+    
+    # Perform search
+    query = "What is machine learning?"
+    print(f"\n🔍 Searching: '{query}'")
+    
+    results, metadata = search_engine.search(
+        query=query,
+        top_n=5,
+        mode='fast',  # Fast semantic search
+        save_results=True
+    )
+    
+    # Display results
+    print(f"\n📊 Found {len(results)} results:")
+    print("="*70)
+    
+    for result in results:
+        print(f"\n[Rank {result.rank}] Confidence: {result.confidence:.3f}")
+        print(f"{'─'*70}")
+        print(f"Content: {result.content[:200]}...")
+        print(f"Scores: {result.scores}")
+        
+        # Show metadata
+        if 'title' in result.metadata:
+            print(f"Title: {result.metadata['title']}")
+        if 'source' in result.metadata:
+            print(f"Source: {result.metadata['source'][:60]}...")
+    
+    print("\n" + "="*70)
+    print(f"✅ Results saved to: {metadata.get('result_file')}")
+    print("="*70 + "\n")
+
+
+# ============================================================================
+# EXAMPLE 3: Parallel Multi-Strategy Search (BEST RESULTS)
+# ============================================================================
+
+def example_3_parallel_search():
+    """
+    Example 3: Parallel multi-strategy search for best results
+    
+    This is the RECOMMENDED approach for production use!
+    
+    Runs 4 strategies simultaneously:
+    1. Semantic search (vector similarity)
+    2. Hybrid search (BM25 + vector)
+    3. MMR search (diverse results)
+    4. Rerank search (cross-encoder)
+    
+    Then combines all results using Reciprocal Rank Fusion
+    """
+    print("\n" + "="*70)
+    print("EXAMPLE 3: Parallel Multi-Strategy Search (BEST RESULTS)")
+    print("="*70)
+    
+    # Initialize
+    db = ChromaDBManager()
+    db.create_collection(collection_name="ml_knowledge_base")
+    
+    if db.collection.count() == 0:
+        print("\n⚠️  Collection is empty! Run Example 1 first.")
+        return
+    
+    # Initialize search engine
+    search_engine = UnifiedSearchEngine(
+        db,
+        confidence_threshold=0.4  # Higher threshold for quality
+    )
+    
+    # Test queries
+    queries = [
+        "What is deep learning?",
+        "How does neural network training work?",
+        "Compare supervised and unsupervised learning"
+    ]
+    
+    for query in queries:
+        print(f"\n{'='*70}")
+        print(f"🔍 Query: '{query}'")
+        print('='*70)
+        
+        # Parallel search (runs all 4 strategies)
+        results, metadata = search_engine.search(
+            query=query,
+            top_n=5,
+            mode='parallel',  # ⭐ KEY: Runs all strategies in parallel
+            save_results=True
+        )
+        
+        print(f"\n📊 Strategy: {metadata['strategy']}")
+        print(f"⏱️  Execution time: {metadata['execution_time']:.3f}s")
+        print(f"📈 Results: {len(results)}")
+        
+        # Show top 3 results with ALL scores
+        for i, result in enumerate(results[:3], 1):
+            print(f"\n[Rank {i}] Confidence: {result.confidence:.3f}")
+            print(f"{'─'*50}")
+            print(f"Content: {result.content[:150]}...")
+            
+            # Show all strategy scores
+            print(f"\n📊 All Strategy Scores:")
+            for strategy, score in result.scores.items():
+                print(f"   • {strategy:20s}: {score:.3f}")
+        
+        print("\n" + "="*70)
+
+
+# ============================================================================
+# EXAMPLE 4: Using Results for NLP Pipeline
+# ============================================================================
+
+def example_4_nlp_integration():
+    """
+    Example 4: Export and use results for NLP pipelines
+    
+    Shows how to:
+    - Search and get high-confidence results
+    - Export in different formats (context, QA, chunks)
+    - Use with LLM/NLP models
+    """
+    print("\n" + "="*70)
+    print("EXAMPLE 4: NLP Pipeline Integration")
+    print("="*70)
+    
+    # Initialize
+    db = ChromaDBManager()
+    db.create_collection(collection_name="ml_knowledge_base")
+    
+    if db.collection.count() == 0:
+        print("\n⚠️  Collection is empty! Run Example 1 first.")
+        return
+    
+    search_engine = UnifiedSearchEngine(db, confidence_threshold=0.5)
+    
+    # Search query
+    query = "Explain neural networks and how they work"
+    print(f"\n🔍 Query: '{query}'")
+    
+    # Get results
+    results, metadata = search_engine.search(
+        query=query,
+        top_n=10,
+        mode='parallel',
+        save_results=True
+    )
+    
+    print(f"\n✅ Found {len(results)} high-confidence results")
+    
+    # Extract result ID for export
+    result_file = metadata.get('result_file')
+    if result_file:
+        result_id = Path(result_file).stem.replace('result_', '')
+        
+        # Export in different formats
+        print("\n📤 Exporting results...")
+        
+        # 1. Context format (for RAG)
+        context_export = search_engine.export_for_nlp(result_id, 'context')
+        if context_export:
+            print("\n1️⃣  CONTEXT FORMAT (for RAG):")
+            print("─"*70)
+            print(context_export[:300] + "...")
+            
+            # Save to file
+            context_file = f"data/search_results/result_{result_id}_context.txt"
+            with open(context_file, 'w', encoding='utf-8') as f:
+                f.write(context_export)
+            print(f"✅ Saved to: {context_file}")
+        
+        # 2. QA format (for question answering)
+        qa_export = search_engine.export_for_nlp(result_id, 'qa')
+        if qa_export:
+            print("\n2️⃣  QA FORMAT (for Question Answering):")
+            print("─"*70)
+            qa_data = json.loads(qa_export)
+            print(f"Question: {qa_data['question']}")
+            print(f"Contexts: {len(qa_data['contexts'])} passages")
+            print(f"Confidence scores: {qa_data['confidence_scores'][:3]}...")
+            
+            # Save to file
+            qa_file = f"data/search_results/result_{result_id}_qa.json"
+            with open(qa_file, 'w', encoding='utf-8') as f:
+                f.write(qa_export)
+            print(f"✅ Saved to: {qa_file}")
+        
+        # 3. Chunks format (for processing)
+        chunks_export = search_engine.export_for_nlp(result_id, 'chunks')
+        if chunks_export:
+            chunks_data = json.loads(chunks_export)
+            print(f"\n3️⃣  CHUNKS FORMAT (for Processing):")
+            print("─"*70)
+            print(f"Total chunks: {len(chunks_data)}")
+            print(f"First chunk: {chunks_data[0]['text'][:100]}...")
+            
+            # Save to file
+            chunks_file = f"data/search_results/result_{result_id}_chunks.json"
+            with open(chunks_file, 'w', encoding='utf-8') as f:
+                f.write(chunks_export)
+            print(f"✅ Saved to: {chunks_file}")
+    
+    # Show how to use with LLM
+    print("\n" + "="*70)
+    print("💡 Using with LLM/NLP Model:")
+    print("="*70)
+    
+    # Get high-confidence contexts
+    contexts = [r.content for r in results if r.confidence > 0.6]
+    
+    print(f"""
+# Example LLM prompt:
+prompt = f\"\"\"
+Based on the following context, answer the question.
+
+Context:
+{' '.join(contexts[:3])}
+
+Question: {query}
+
+Answer:
+\"\"\"
+
+# Then pass to your LLM (OpenAI, Anthropic, etc.)
+# response = llm.generate(prompt)
+""")
+    
+    print("\n" + "="*70)
+
+
+# ============================================================================
+# EXAMPLE 5: Advanced Usage - Analytics and Result Tracking
+# ============================================================================
+
+def example_5_advanced_usage():
+    """
+    Example 5: Advanced features
+    
+    Shows:
+    - Search analytics
+    - Result comparison
+    - Performance tracking
+    - Custom confidence thresholds
+    """
+    print("\n" + "="*70)
+    print("EXAMPLE 5: Advanced Usage")
+    print("="*70)
+    
+    # Initialize
+    db = ChromaDBManager()
+    db.create_collection(collection_name="ml_knowledge_base")
+    
+    if db.collection.count() == 0:
+        print("\n⚠️  Collection is empty! Run Example 1 first.")
+        return
+    
+    # Different confidence thresholds
+    thresholds = [0.3, 0.5, 0.7]
+    query = "What are convolutional neural networks?"
+    
+    print(f"\n🔍 Query: '{query}'")
+    print("\n📊 Testing different confidence thresholds:")
+    
+    for threshold in thresholds:
+        search_engine = UnifiedSearchEngine(db, confidence_threshold=threshold)
+        
+        results, metadata = search_engine.search(
+            query=query,
+            top_n=10,
+            mode='parallel',
+            save_results=True
+        )
+        
+        avg_conf = sum(r.confidence for r in results) / len(results) if results else 0
+        
+        print(f"\n  Threshold {threshold}: {len(results)} results, avg confidence: {avg_conf:.3f}")
+    
+    # Show analytics
+    print("\n" + "="*70)
+    print("📊 SEARCH ANALYTICS")
+    print("="*70)
+    
+    search_engine = UnifiedSearchEngine(db, confidence_threshold=0.3)
+    analytics = search_engine.get_analytics()
+    
+    print(json.dumps(analytics, indent=2))
+    
+    # Compare search modes
+    print("\n" + "="*70)
+    print("⚡ COMPARING SEARCH MODES")
+    print("="*70)
+    
+    modes = ['fast', 'accurate', 'parallel']
+    
+    for mode in modes:
+        results, metadata = search_engine.search(
+            query="machine learning algorithms",
+            top_n=5,
+            mode=mode,
+            save_results=False
+        )
+        
+        print(f"\n{mode.upper()} mode:")
+        print(f"  Time: {metadata['execution_time']:.3f}s")
+        print(f"  Results: {len(results)}")
+        if results:
+            print(f"  Top confidence: {results[0].confidence:.3f}")
+            print(f"  Strategies used: {list(results[0].scores.keys())}")
+    
+    print("\n" + "="*70)
+
+
+# ============================================================================
+# EXAMPLE 6: Complete Workflow (Build → Search → Use)
+# ============================================================================
+
+def example_6_complete_workflow():
+    """
+    Example 6: Complete end-to-end workflow
+    
+    This is what you'd typically do in production:
+    1. Build collection once
+    2. Search multiple times
+    3. Use results for your NLP task
+    """
+    print("\n" + "="*70)
+    print("EXAMPLE 6: Complete End-to-End Workflow")
+    print("="*70)
+    
+    # Step 1: Build (do this once)
+    print("\n" + "="*70)
+    print("STEP 1: Build Collection (one-time setup)")
     print("="*70)
     
     extractor = DocumentExtractor()
-    
-    # Process multiple files
-    files = [
-        "data/file1.pdf",
-        "data/file2.docx",
-        "data/file3.xlsx",
-        "data/file4.txt"
+    sources = [
+        "https://en.wikipedia.org/wiki/Machine_learning",
     ]
     
-    # Filter existing files
-    existing_files = [f for f in files if Path(f).exists()]
+    print("\n📥 Extracting...")
+    documents = extractor.extract_multiple(sources, chunk=True, use_scrapy=False)
+    extractor.save_documents(documents)
     
-    if not existing_files:
-        print("❌ No files found. Create sample files first:")
-        print("   data/file1.pdf, data/file2.docx, etc.")
-        return
+    print("\n💾 Indexing...")
+    db = ChromaDBManager()
+    db.create_collection("production_db", reset=True)
     
-    print(f"📁 Processing {len(existing_files)} files in parallel...")
+    docs_for_indexing = [
+        {'id': doc.doc_id, 'content': doc.content, 
+         'metadata': doc.metadata, 'document_id': doc.document_id}
+        for doc in documents
+    ]
+    db.add_documents(docs_for_indexing)
     
-    documents = extractor.extract_multiple(
-        sources=existing_files,
-        chunk=True,
-        parallel=True  # Parallel processing
-    )
+    print(f"✅ Collection ready with {db.collection.count()} documents")
     
-    print(f"✅ Extracted {len(documents)} chunks from {len(existing_files)} files")
-
-
-# =============================================================================
-# EXAMPLE 8: Interactive Search Session
-# =============================================================================
-
-def example_8_interactive_search():
-    """
-    Interactive search session
-    """
+    # Step 2: Search (do this many times)
     print("\n" + "="*70)
-    print("EXAMPLE 8: Interactive Search")
+    print("STEP 2: Search (use for queries)")
     print("="*70)
     
-    pipeline = RAGPipeline()
+    search_engine = UnifiedSearchEngine(db, confidence_threshold=0.4)
     
-    # Load existing database
-    search_engine = pipeline.run_search_only()
+    user_queries = [
+        "What is supervised learning?",
+        "How do neural networks learn?",
+        "What are the types of machine learning?"
+    ]
     
-    if not search_engine:
-        print("❌ No database found. Run example 1 first.")
-        return
+    for query in user_queries:
+        print(f"\n🔍 '{query}'")
+        
+        results, metadata = search_engine.search(
+            query=query,
+            top_n=3,
+            mode='parallel',
+            save_results=True
+        )
+        
+        print(f"   ✅ {len(results)} results in {metadata['execution_time']:.2f}s")
+        if results:
+            print(f"   📊 Top confidence: {results[0].confidence:.3f}")
     
-    # Start interactive session
-    pipeline.interactive_search()
-
-
-# =============================================================================
-# EXAMPLE 9: Configuration Management
-# =============================================================================
-
-def example_9_configuration():
-    """
-    View and customize configuration
-    """
+    # Step 3: Use results
     print("\n" + "="*70)
-    print("EXAMPLE 9: Configuration")
+    print("STEP 3: Use Results for NLP Task")
     print("="*70)
     
-    # Print current configuration
-    print_config_summary()
+    # Get last search results
+    query = user_queries[-1]
+    results, metadata = search_engine.search(query, top_n=5, mode='parallel')
     
-    # Custom configuration
-    from config.settings import ChunkingConfig, EMBEDDING
+    # Extract high-confidence contexts
+    contexts = [r.content for r in results if r.confidence > 0.5]
     
-    print("\n📝 Custom Configuration Example:")
+    print(f"\n✅ Extracted {len(contexts)} high-confidence contexts")
+    print("\n💡 Ready to use with your LLM/NLP model:")
+    print(f"   - Query: {query}")
+    print(f"   - Contexts: {len(contexts)} passages")
+    print(f"   - Total words: {sum(len(c.split()) for c in contexts)}")
     
-    custom_chunking = ChunkingConfig(
-        method="semantic",
-        target_words=200,
-        overlap_words=40,
-        similarity_threshold=0.6
-    )
-    
-    print(f"   Chunking method: {custom_chunking.method}")
-    print(f"   Target words: {custom_chunking.target_words}")
-    print(f"   Overlap: {custom_chunking.overlap_words}")
-    
-    print(f"\n   Embedding model: {EMBEDDING.model_name}")
-    print(f"   Dimensions: {EMBEDDING.dimension}")
-
-
-# =============================================================================
-# EXAMPLE 10: Registry System (Phase 2 Feature)
-# =============================================================================
-
-def example_10_registry_system():
-    """
-    Demonstrate document registry for metadata efficiency
-    """
     print("\n" + "="*70)
-    print("EXAMPLE 10: Document Registry System")
+    print("✅ WORKFLOW COMPLETE!")
     print("="*70)
-    
-    from utils.metadata_manager import get_registry
-    
-    registry = get_registry()
-    
-    # Register a document
-    doc_id = registry.register_document(
-        source="https://example.com/article",
-        metadata={
-            'title': 'Example Article',
-            'url': 'https://example.com/article',
-            'author': 'John Doe',
-            'published': '2024-01-01',
-            'word_count': 2000
-        }
+    print("\nNext steps:")
+    print("1. Pass contexts to your LLM")
+    print("2. Generate answer based on contexts")
+    print("3. Track and improve results over time")
+    print("="*70 + "\n")
+
+
+# ============================================================================
+# MAIN - Run Examples
+# ============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Production RAG System - Usage Examples",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    print(f"📚 Registered document: {doc_id}")
+    parser.add_argument(
+        '--example',
+        type=int,
+        choices=[1, 2, 3, 4, 5, 6],
+        help='Run specific example (1-6)'
+    )
     
-    # Simulate chunk metadata
-    chunk_meta = {
-        'chunk_index': 0,
-        'chunk_word_count': 150,
-        'chunk_keywords': ['machine', 'learning', 'data']
+    parser.add_argument(
+        '--all',
+        action='store_true',
+        help='Run all examples'
+    )
+    
+    args = parser.parse_args()
+    
+    examples = {
+        1: ("Build Collection", example_1_build_collection),
+        2: ("Basic Search", example_2_basic_search),
+        3: ("Parallel Search (RECOMMENDED)", example_3_parallel_search),
+        4: ("NLP Integration", example_4_nlp_integration),
+        5: ("Advanced Usage", example_5_advanced_usage),
+        6: ("Complete Workflow", example_6_complete_workflow),
     }
     
-    # Reconstruct full metadata
-    full_meta = registry.reconstruct_chunk_metadata(doc_id, chunk_meta)
-    
-    print(f"\n📊 Reconstructed Metadata:")
-    print(f"   Document fields: title, url, author, published, word_count")
-    print(f"   Chunk fields: chunk_index, chunk_word_count, chunk_keywords")
-    print(f"   Total fields: {len(full_meta)}")
-    
-    # Show storage savings
-    stats = registry.get_statistics()
-    print(f"\n💾 Registry Stats:")
-    print(f"   Total documents: {stats['total_documents']}")
-    print(f"   Registry size: {stats['registry_size_kb']:.2f} KB")
-    
-    print("\n✅ Storage Benefit:")
-    print("   Without registry: Each chunk stores ALL metadata (redundant)")
-    print("   With registry: Document metadata stored ONCE (85% reduction)")
-
-
-# =============================================================================
-# RUN ALL EXAMPLES
-# =============================================================================
-
-def run_all_examples():
-    """Run all examples in sequence"""
-    examples = [
-        ("Quick Start", example_1_quick_start),
-        ("Extraction Only", example_2_extraction_only),
-        ("Custom Chunking", example_3_custom_chunking),
-        ("Search Strategies", example_4_search_strategies),
-        ("Metadata Filtering", example_5_metadata_filtering),
-        ("Load and Index", example_6_load_and_index),
-        ("Batch Processing", example_7_batch_processing),
-        ("Configuration", example_9_configuration),
-        ("Registry System", example_10_registry_system),
-    ]
-    
-    print("\n" + "="*70)
-    print("RAG SYSTEM - ALL EXAMPLES")
-    print("="*70)
-    print("\nAvailable examples:")
-    for i, (name, _) in enumerate(examples, 1):
-        print(f"  {i}. {name}")
-    
-    print("\nSelect example (1-9) or 'all' to run all:")
-    choice = input("Choice: ").strip()
-    
-    if choice.lower() == 'all':
-        for name, func in examples:
+    if args.all:
+        print("\n" + "🚀"*35)
+        print("RUNNING ALL EXAMPLES")
+        print("🚀"*35)
+        
+        for num, (name, func) in examples.items():
             try:
                 func()
-                input("\nPress Enter to continue...")
+                input(f"\n✅ Example {num} complete. Press Enter to continue...")
             except Exception as e:
-                print(f"\n❌ Error in {name}: {e}")
-                input("\nPress Enter to continue...")
+                print(f"\n❌ Example {num} failed: {e}")
+                continue
+    
+    elif args.example:
+        num = args.example
+        name, func = examples[num]
+        print(f"\n🚀 Running Example {num}: {name}")
+        func()
+    
     else:
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(examples):
-                examples[idx][1]()
-            else:
-                print("Invalid choice")
-        except ValueError:
-            print("Invalid input")
+        print("\n" + "="*70)
+        print("Production RAG System - Usage Examples")
+        print("="*70)
+        print("\nAvailable examples:")
+        for num, (name, _) in examples.items():
+            print(f"  {num}. {name}")
+        print("\nUsage:")
+        print("  python example_usage.py --example 1    # Run specific example")
+        print("  python example_usage.py --all           # Run all examples")
+        print("\nRecommended order:")
+        print("  1. Run Example 1 first (build collection)")
+        print("  2. Then run Examples 2-6 (search and use)")
+        print("  3. Example 3 (Parallel Search) is RECOMMENDED for production!")
+        print("="*70 + "\n")
 
 
 if __name__ == "__main__":
-    from pathlib import Path
-    
-    # Ensure data directories exist
-    Path("data/extracted").mkdir(parents=True, exist_ok=True)
-    Path("data/registry").mkdir(parents=True, exist_ok=True)
-    
-    # Run examples
-    run_all_examples()
+    main()

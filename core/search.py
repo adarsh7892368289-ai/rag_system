@@ -1,15 +1,21 @@
 """
-Vector Search System - Phase 1+2 Complete
+Production RAG Search Engine - Complete System
 
-Key improvements:
-1. Metadata flattening for ChromaDB compatibility (Phase 1 - CRITICAL FIX)
-2. Metadata reconstruction from registry (Phase 2)
-3. Clean, efficient search with all strategies
+Features:
+- Parallel multi-strategy execution for best results
+- Confidence scoring with all strategy scores
+- Result persistence for NLP pipelines
+- Analytics and performance tracking
+- Metadata reconstruction (Phase 1+2)
 """
 
 import json
+import time
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
+from datetime import datetime
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
@@ -17,7 +23,7 @@ import chromadb
 from sklearn.metrics.pairwise import cosine_similarity
 from rank_bm25 import BM25Okapi
 
-from config.settings import SEARCH, DATABASE, EMBEDDING, METADATA
+from config.settings import SEARCH, DATABASE, EMBEDDING, METADATA, DATA_DIR
 from utils.logger import get_logger, PerformanceLogger
 from utils.validators import TextValidator, ConfigValidator
 from utils.metadata_manager import get_registry
@@ -25,23 +31,24 @@ from utils.metadata_manager import get_registry
 logger = get_logger("search")
 
 
+# ============================================================================
+# CORE COMPONENTS
+# ============================================================================
+
 def flatten_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
-    """    
+    """
+    Flatten nested metadata for ChromaDB compatibility
+    
     Args:
         metadata: Original metadata (may have nested dicts/lists)
     
     Returns:
         Flattened metadata compatible with ChromaDB
-    
-    Example:
-        Input:  {'chunking': {'method': 'sentence_aware'}}
-        Output: {'chunking_method': 'sentence_aware'}
     """
     flat = {}
     
     for key, value in metadata.items():
         if isinstance(value, dict):
-            # Flatten nested dicts
             for nested_key, nested_value in value.items():
                 flat_key = f"{key}_{nested_key}"
                 if isinstance(nested_value, (str, int, float, bool)) or nested_value is None:
@@ -49,7 +56,6 @@ def flatten_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
                 else:
                     flat[flat_key] = str(nested_value)
         elif isinstance(value, list):
-            # Convert lists to JSON string
             flat[key] = json.dumps(value)
         elif isinstance(value, (str, int, float, bool)) or value is None:
             flat[key] = value
@@ -63,7 +69,6 @@ class EmbeddingGenerator:
     """Generate vector embeddings"""
     
     def __init__(self, model_name: Optional[str] = None):
-        """Initialize embedding model"""
         self.model_name = model_name or EMBEDDING.model_name
         
         logger.info(f"🔄 Loading embedding model: {self.model_name}")
@@ -91,14 +96,10 @@ class EmbeddingGenerator:
 
 class ChromaDBManager:
     """
-    ChromaDB manager with Phase 1+2 improvements
-    
-    - Flattens metadata before storage (Phase 1)
-    - Reconstructs full metadata on retrieval (Phase 2)
+    ChromaDB manager with metadata flattening and reconstruction
     """
     
     def __init__(self, persist_directory: Optional[str] = None):
-        """Initialize ChromaDB"""
         self.persist_directory = persist_directory or DATABASE.persist_directory
         
         logger.info(f"\n🔵 Initializing ChromaDB: {self.persist_directory}")
@@ -132,13 +133,7 @@ class ChromaDBManager:
         return self.collection
     
     def add_documents(self, documents: List[Dict], batch_size: Optional[int] = None):
-        """
-        Add documents with FLATTENED metadata (Phase 1 fix)
-        
-        Args:
-            documents: List of dicts with 'id', 'content', 'metadata', 'document_id'
-            batch_size: Batch size for processing
-        """
+        """Add documents with flattened metadata"""
         if not self.collection:
             raise ValueError("Create collection first using create_collection()")
         
@@ -146,25 +141,23 @@ class ChromaDBManager:
         
         logger.info(f"\n📥 Adding {len(documents)} documents...")
         
-        # Cache documents for BM25
         self.documents_cache = documents
         
-        # Prepare data with FLATTENED metadata (PHASE 1 FIX)
         texts = [doc['content'] for doc in documents]
         ids = [doc['id'] for doc in documents]
-        metadatas = [flatten_metadata(doc.get('metadata', {})) for doc in documents]
         
-        # Add document_id to metadata for reconstruction
-        for i, doc in enumerate(documents):
+        # Prepare metadata with proper types for ChromaDB
+        metadatas = []
+        for doc in documents:
+            flat_meta = flatten_metadata(doc.get('metadata', {}))
             if 'document_id' in doc:
-                metadatas[i]['document_id'] = doc['document_id']
+                flat_meta['document_id'] = doc['document_id']
+            metadatas.append(flat_meta)
         
-        # Generate embeddings
         logger.info("🔄 Generating embeddings...")
         with PerformanceLogger("Embedding generation"):
             embeddings = self.embedding_model.encode_batch(texts, show_progress=True).tolist()
         
-        # Add in batches
         logger.info(f"💾 Storing in database (batch_size={batch_size})...")
         for i in range(0, len(documents), batch_size):
             end_idx = min(i + batch_size, len(documents))
@@ -181,46 +174,26 @@ class ChromaDBManager:
         
         logger.info(f"✅ Added {self.collection.count()} documents")
     
-    def search(self, query: str, n_results: int = 5, filters: Optional[Dict] = None) -> List[Dict]:
-        """
-        Semantic search with metadata reconstruction (Phase 2)
-        
-        Args:
-            query: Search query
-            n_results: Number of results
-            filters: Metadata filters
-        
-        Returns:
-            Results with reconstructed metadata
-        """
+    def search(self, query: str, n_results: int = 5) -> List[Dict]:
+        """Semantic search with metadata reconstruction"""
         if not self.collection:
             raise ValueError("Create collection first")
         
         query = TextValidator.validate_query(query)
         ConfigValidator.validate_search_params(n_results)
         
-        # Generate query embedding
         query_embedding = self.embedding_model.encode(query)
         
-        # Search
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=n_results,
-            where=filters,
             include=['documents', 'metadatas', 'distances']
         )
         
-        # Format and reconstruct metadata (PHASE 2)
         return self._format_results(results, query)
     
     def _format_results(self, results, query: str) -> List[Dict]:
-        """
-        Format results with metadata reconstruction (Phase 2)
-        
-        Reconstructs full metadata by merging:
-        - Document-level metadata from registry
-        - Chunk-level metadata from ChromaDB
-        """
+        """Format results with metadata reconstruction"""
         if not results or not results.get('ids') or not results['ids'][0]:
             return []
         
@@ -235,7 +208,7 @@ class ChromaDBManager:
             distance = distances[i]
             chunk_metadata = metadatas[i]
             
-            # PHASE 2: Reconstruct full metadata from registry
+            # Reconstruct full metadata from registry
             if METADATA.reconstruct_on_search and self.registry:
                 document_id = chunk_metadata.get('document_id')
                 if document_id:
@@ -248,13 +221,11 @@ class ChromaDBManager:
             else:
                 full_metadata = chunk_metadata
             
-            # Convert distance to similarity (0-1, higher is better)
             similarity_score = 1 / (1 + distance)
             
             formatted_results.append({
                 'id': ids[i],
-                'content': content[:300] + "..." if len(content) > 300 else content,
-                'full_content': content,
+                'content': content,
                 'metadata': full_metadata,
                 'similarity_score': similarity_score,
                 'distance': distance,
@@ -265,112 +236,38 @@ class ChromaDBManager:
         return formatted_results
 
 
-class QueryRouter:
-    """Intelligent query routing"""
-    
-    def __init__(self):
-        """Initialize router"""
-        self.routing_rules = {
-            'factual': ['what is', 'what are', 'define', 'definition'],
-            'explanation': ['how', 'why', 'explain', 'describe'],
-            'comparison': ['compare', 'difference', 'versus', 'vs'],
-            'listing': ['list', 'types of', 'examples of']
-        }
-        
-        logger.info("🧭 Query router initialized")
-    
-    def route(self, query: str) -> Tuple[str, Dict]:
-        """
-        Route query to best search strategy
-        
-        Args:
-            query: Search query
-        
-        Returns:
-            (strategy_name, strategy_params)
-        """
-        query_lower = query.lower()
-        query_type = self._classify_query(query_lower)
-        query_length = len(query.split())
-        has_specific_terms = self._has_specific_terms(query_lower)
-        
-        # Route based on analysis
-        if query_type == "factual" and has_specific_terms:
-            return "hybrid", {"alpha": 0.7}
-        elif query_type == "explanation":
-            return "mmr", {"lambda_param": 0.7}
-        elif query_type == "comparison":
-            return "semantic", {}
-        elif has_specific_terms and query_length < 5:
-            return "hybrid", {"alpha": 0.3}  # BM25-heavy
-        else:
-            return "semantic", {}
-    
-    def _classify_query(self, query: str) -> str:
-        """Classify query type"""
-        for qtype, keywords in self.routing_rules.items():
-            if any(query.startswith(kw) for kw in keywords):
-                return qtype
-        return "general"
-    
-    def _has_specific_terms(self, query: str) -> bool:
-        """Check for specific/technical terms"""
-        words = query.split()
-        has_acronyms = any(w.isupper() and len(w) >= 2 for w in words)
-        has_proper_nouns = any(w[0].isupper() for w in words[1:])
-        has_numbers = any(c.isdigit() for c in query)
-        return has_acronyms or has_proper_nouns or has_numbers
+# ============================================================================
+# ADVANCED SEARCH STRATEGIES
+# ============================================================================
 
-
-class AdvancedSearchTechniques:
-    """Advanced search methods"""
+class AdvancedSearchStrategies:
+    """All search strategies with parallel execution"""
     
     def __init__(self, db_manager: ChromaDBManager):
-        """Initialize advanced search"""
         self.db_manager = db_manager
         self.cross_encoder = None
         self.bm25 = None
         
-        logger.info("🚀 Advanced search initialized")
+        logger.info("🚀 Advanced search strategies initialized")
     
     def hybrid_search(self, query: str, n_results: int = 5, alpha: float = 0.7) -> List[Dict]:
-        """
-        Hybrid search: BM25 + Vector
-        
-        Args:
-            query: Search query
-            n_results: Number of results
-            alpha: Vector weight (0.0=pure BM25, 1.0=pure vector)
-        
-        Returns:
-            Ranked results
-        """
+        """Hybrid search: BM25 + Vector"""
         ConfigValidator.validate_search_params(n_results, alpha=alpha)
         
-        logger.debug(f"🔄 Hybrid search (α={alpha})")
-        
-        # Initialize BM25
         if not self.bm25:
             self._initialize_bm25()
         
-        # Get vector results
         vector_results = self.db_manager.search(query, n_results=n_results * 2)
         
-        if not vector_results:
-            return []
-        
-        # Calculate BM25 scores
-        query_tokens = query.lower().split()
-        bm25_scores = self.bm25.get_scores(query_tokens) if self.bm25 else []
-        
-        if not bm25_scores:
+        if not vector_results or not self.bm25:
             return vector_results[:n_results]
         
-        # Normalize BM25
+        query_tokens = query.lower().split()
+        bm25_scores = self.bm25.get_scores(query_tokens)
+        
         max_bm25 = max(bm25_scores)
         min_bm25 = min(bm25_scores)
         
-        # Calculate hybrid scores
         hybrid_results = []
         for result in vector_results:
             doc_idx = next(
@@ -392,33 +289,17 @@ class AdvancedSearchTechniques:
                 result['final_score'] = float(hybrid_score)
                 hybrid_results.append(result)
         
-        # Sort by hybrid score
         hybrid_results.sort(key=lambda x: x['hybrid_score'], reverse=True)
         
-        # Update ranks
         for i, result in enumerate(hybrid_results[:n_results], 1):
             result['rank'] = i
         
-        logger.debug(f"✅ Hybrid search: {len(hybrid_results[:n_results])} results")
         return hybrid_results[:n_results]
     
     def mmr_search(self, query: str, n_results: int = 5, lambda_param: float = 0.7) -> List[Dict]:
-        """
-        MMR search for diverse results
-        
-        Args:
-            query: Search query
-            n_results: Number of results
-            lambda_param: Relevance vs diversity (0.0=max diversity, 1.0=max relevance)
-        
-        Returns:
-            Diverse results
-        """
+        """MMR search for diverse results"""
         ConfigValidator.validate_search_params(n_results, lambda_param=lambda_param)
         
-        logger.debug(f"🔄 MMR search (λ={lambda_param})")
-        
-        # Get candidates
         candidates = self.db_manager.search(
             query,
             n_results=min(n_results * SEARCH.mmr_candidates_multiplier, SEARCH.max_top_k)
@@ -427,21 +308,17 @@ class AdvancedSearchTechniques:
         if not candidates:
             return []
         
-        # Get embeddings
-        candidate_texts = [c['full_content'] for c in candidates]
+        candidate_texts = [c['content'] for c in candidates]
         candidate_embeddings = self.db_manager.embedding_model.encode_batch(candidate_texts)
         
-        # MMR selection
         selected = []
         selected_embeddings = []
         remaining = list(range(len(candidates)))
         
-        # Select first (most relevant)
         selected.append(0)
         selected_embeddings.append(candidate_embeddings[0])
         remaining.remove(0)
         
-        # Iteratively select diverse documents
         while len(selected) < n_results and remaining:
             best_score = -float('inf')
             best_idx = None
@@ -449,13 +326,11 @@ class AdvancedSearchTechniques:
             for idx in remaining:
                 relevance = candidates[idx]['similarity_score']
                 
-                # Max similarity to selected
                 candidate_emb = candidate_embeddings[idx].reshape(1, -1)
                 selected_embs = np.array(selected_embeddings)
                 similarities = cosine_similarity(candidate_emb, selected_embs)[0]
                 max_sim = float(np.max(similarities))
                 
-                # MMR score
                 mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
                 
                 if mmr_score > best_score:
@@ -467,32 +342,18 @@ class AdvancedSearchTechniques:
                 selected_embeddings.append(candidate_embeddings[best_idx])
                 remaining.remove(best_idx)
         
-        # Prepare results
         mmr_results = [candidates[i] for i in selected]
         for i, result in enumerate(mmr_results, 1):
             result['mmr_score'] = result['similarity_score']
             result['final_score'] = result['similarity_score']
             result['rank'] = i
         
-        logger.debug(f"✅ MMR search: {len(mmr_results)} results")
         return mmr_results
     
     def rerank_search(self, query: str, n_results: int = 5,
                      initial_results: Optional[List[Dict]] = None) -> List[Dict]:
-        """
-        Re-rank using Cross-Encoder
-        
-        Args:
-            query: Search query
-            n_results: Final results
-            initial_results: Pre-fetched results
-        
-        Returns:
-            Re-ranked results
-        """
+        """Re-rank using Cross-Encoder"""
         ConfigValidator.validate_search_params(n_results)
-        
-        logger.debug("🔄 Re-ranking with Cross-Encoder")
         
         if initial_results is None:
             initial_results = self.db_manager.search(
@@ -503,31 +364,24 @@ class AdvancedSearchTechniques:
         if not initial_results:
             return []
         
-        # Initialize cross-encoder
         if not self.cross_encoder:
             logger.info(f"Loading Cross-Encoder: {SEARCH.rerank_model}")
             self.cross_encoder = CrossEncoder(SEARCH.rerank_model)
         
-        # Prepare pairs
-        pairs = [[query, result['full_content']] for result in initial_results]
+        pairs = [[query, result['content']] for result in initial_results]
         
-        # Get scores
         with PerformanceLogger("Cross-encoder scoring"):
             scores = self.cross_encoder.predict(pairs)
         
-        # Add scores
         for i, result in enumerate(initial_results):
             result['rerank_score'] = float(scores[i])
             result['final_score'] = float(scores[i])
         
-        # Sort by rerank score
         reranked = sorted(initial_results, key=lambda x: x['rerank_score'], reverse=True)
         
-        # Update ranks
         for i, result in enumerate(reranked[:n_results], 1):
             result['rank'] = i
         
-        logger.debug(f"✅ Re-ranking: {len(reranked[:n_results])} results")
         return reranked[:n_results]
     
     def _initialize_bm25(self):
@@ -543,131 +397,389 @@ class AdvancedSearchTechniques:
         logger.info(f"✅ BM25 index built ({len(corpus)} docs)")
 
 
+# ============================================================================
+# RESULT TRACKING & ANALYTICS
+# ============================================================================
+
+class SearchResult:
+    """Enhanced search result with confidence scoring"""
+    
+    def __init__(self, content: str, metadata: Dict, scores: Dict[str, float],
+                 rank: int, query: str):
+        self.content = content
+        self.metadata = metadata
+        self.scores = scores
+        self.rank = rank
+        self.query = query
+        self.confidence = self._calculate_confidence()
+    
+    def _calculate_confidence(self) -> float:
+        """Calculate unified confidence score from all strategies"""
+        if not self.scores:
+            return 0.0
+        
+        weights = {
+            'semantic_score': 0.3,
+            'hybrid_score': 0.3,
+            'rerank_score': 0.25,
+            'mmr_score': 0.15
+        }
+        
+        weighted_sum = 0.0
+        total_weight = 0.0
+        
+        for score_type, weight in weights.items():
+            if score_type in self.scores:
+                weighted_sum += self.scores[score_type] * weight
+                total_weight += weight
+        
+        return weighted_sum / total_weight if total_weight > 0 else 0.0
+    
+    def to_dict(self) -> Dict:
+        return {
+            'content': self.content,
+            'metadata': self.metadata,
+            'scores': self.scores,
+            'confidence': self.confidence,
+            'rank': self.rank,
+            'query': self.query
+        }
+    
+    def __repr__(self) -> str:
+        return f"SearchResult(rank={self.rank}, confidence={self.confidence:.3f})"
+
+
+class ResultTracker:
+    """Track and persist search results"""
+    
+    def __init__(self, results_dir: Optional[str] = None):
+        self.results_dir = Path(results_dir or DATA_DIR / "search_results")
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.history_file = self.results_dir / "search_history.jsonl"
+        
+        logger.info(f"📊 Result tracker: {self.results_dir}")
+    
+    def save_results(self, query: str, results: List[SearchResult],
+                    strategy_used: str, execution_time: float,
+                    metadata: Optional[Dict] = None) -> str:
+        """Save search results"""
+        timestamp = datetime.now().isoformat()
+        result_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        result_data = {
+            'result_id': result_id,
+            'timestamp': timestamp,
+            'query': query,
+            'strategy': strategy_used,
+            'execution_time': execution_time,
+            'num_results': len(results),
+            'avg_confidence': sum(r.confidence for r in results) / len(results) if results else 0,
+            'results': [r.to_dict() for r in results],
+            'metadata': metadata or {}
+        }
+        
+        result_file = self.results_dir / f"result_{result_id}.json"
+        with open(result_file, 'w', encoding='utf-8') as f:
+            json.dump(result_data, f, indent=2, ensure_ascii=False)
+        
+        with open(self.history_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({
+                'result_id': result_id,
+                'timestamp': timestamp,
+                'query': query,
+                'strategy': strategy_used,
+                'num_results': len(results),
+                'avg_confidence': result_data['avg_confidence'],
+                'execution_time': execution_time
+            }) + '\n')
+        
+        logger.info(f"💾 Results saved: {result_file}")
+        return str(result_file)
+    
+    def get_analytics(self) -> Dict:
+        """Get search analytics"""
+        if not self.history_file.exists():
+            return {'total_searches': 0, 'message': 'No search history yet'}
+        
+        history = []
+        with open(self.history_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    history.append(json.loads(line))
+                except:
+                    pass
+        
+        if not history:
+            return {'total_searches': 0, 'message': 'No valid search history'}
+        
+        strategies = Counter(h['strategy'] for h in history)
+        avg_results = sum(h['num_results'] for h in history) / len(history)
+        avg_confidence = sum(h['avg_confidence'] for h in history) / len(history)
+        avg_time = sum(h['execution_time'] for h in history) / len(history)
+        
+        return {
+            'total_searches': len(history),
+            'strategies_used': dict(strategies),
+            'avg_results_per_query': round(avg_results, 2),
+            'avg_confidence_score': round(avg_confidence, 3),
+            'avg_execution_time': round(avg_time, 3),
+            'last_search': history[-1] if history else None
+        }
+    
+    def export_for_nlp(self, result_id: str, format: str = 'context') -> Optional[str]:
+        """Export results in NLP-friendly format"""
+        result_file = self.results_dir / f"result_{result_id}.json"
+        
+        if not result_file.exists():
+            logger.error(f"Result not found: {result_id}")
+            return None
+        
+        with open(result_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        results = data['results']
+        
+        if format == 'context':
+            context = "\n\n".join([
+                f"[Source {i+1}] (Confidence: {r['confidence']:.2f})\n{r['content']}"
+                for i, r in enumerate(results)
+            ])
+            return context
+        
+        elif format == 'qa':
+            qa_format = {
+                'question': data['query'],
+                'contexts': [r['content'] for r in results],
+                'confidence_scores': [r['confidence'] for r in results],
+                'metadata': [r['metadata'] for r in results]
+            }
+            return json.dumps(qa_format, indent=2)
+        
+        elif format == 'chunks':
+            return json.dumps([
+                {
+                    'text': r['content'],
+                    'confidence': r['confidence'],
+                    'metadata': r['metadata']
+                }
+                for r in results
+            ], indent=2)
+        
+        return None
+
+
+# ============================================================================
+# UNIFIED SEARCH ENGINE
+# ============================================================================
+
 class UnifiedSearchEngine:
     """
-    Unified search with intelligent routing
-    
-    Phase 1+2 complete:
-    - Metadata flattening (Phase 1)
-    - Metadata reconstruction (Phase 2)
-    - All search strategies
+    Production RAG search engine with parallel multi-strategy execution
     """
     
-    def __init__(self, db_manager: ChromaDBManager, enable_routing: bool = True):
-        """Initialize search engine"""
+    def __init__(self, db_manager: ChromaDBManager, confidence_threshold: float = 0.3):
         self.db_manager = db_manager
-        self.advanced = AdvancedSearchTechniques(db_manager)
-        self.router = QueryRouter() if enable_routing else None
-        self.enable_routing = enable_routing
+        self.strategies = AdvancedSearchStrategies(db_manager)
+        self.tracker = ResultTracker()
+        self.confidence_threshold = confidence_threshold
         
         logger.info("🎯 Unified search engine ready")
-        if enable_routing:
-            logger.info("   Intelligent routing: ENABLED")
+        logger.info(f"   Confidence threshold: {confidence_threshold}")
     
-    def search(self, query: str, n_results: int = 5,
-              strategy: Optional[str] = None,
-              strategy_params: Optional[Dict] = None,
-              enable_reranking: Optional[bool] = None) -> List[Dict]:
+    def search(self, query: str, top_n: int = 5, mode: str = 'parallel',
+              save_results: bool = True) -> Tuple[List[SearchResult], Dict]:
         """
-        Universal search with auto-routing
+        Intelligent search with parallel strategy execution
         
         Args:
             query: Search query
-            n_results: Results to return
-            strategy: Force strategy (None for auto)
-            strategy_params: Strategy parameters
-            enable_reranking: Enable re-ranking
+            top_n: Number of results
+            mode: 'parallel' (all strategies), 'fast', 'accurate', 'comprehensive'
+            save_results: Save results to disk
         
         Returns:
-            Search results with reconstructed metadata
-        
-        Strategies: semantic, hybrid, mmr, bm25_heavy
+            (results, metadata)
         """
-        query = TextValidator.validate_query(query)
-        ConfigValidator.validate_search_params(n_results)
+        ConfigValidator.validate_search_params(top_n)
         
-        # Route query
-        if strategy is None and self.enable_routing and self.router:
-            strategy, auto_params = self.router.route(query)
-            strategy_params = strategy_params or auto_params
-        else:
-            strategy = strategy or "semantic"
-            strategy_params = strategy_params or {}
+        start_time = time.time()
         
-        logger.info(f"\n🔍 Search: '{query}'")
-        logger.info(f"   Strategy: {strategy}")
-        
-        # Execute search
-        with PerformanceLogger(f"Search ({strategy})"):
-            if strategy == "semantic":
-                results = self.db_manager.search(query, n_results)
-            elif strategy == "hybrid":
-                alpha = strategy_params.get("alpha", SEARCH.hybrid_alpha)
-                results = self.advanced.hybrid_search(query, n_results, alpha)
-            elif strategy == "mmr":
-                lambda_param = strategy_params.get("lambda_param", SEARCH.mmr_lambda)
-                results = self.advanced.mmr_search(query, n_results, lambda_param)
-            elif strategy == "bm25_heavy":
-                alpha = strategy_params.get("alpha", 0.3)
-                results = self.advanced.hybrid_search(query, n_results, alpha)
-            else:
-                logger.warning(f"Unknown strategy '{strategy}', using semantic")
-                results = self.db_manager.search(query, n_results)
-        
-        # Optional re-ranking
-        if enable_reranking is None:
-            enable_reranking = SEARCH.use_reranking
-        
-        if enable_reranking and results:
-            results = self.advanced.rerank_search(query, n_results, results)
-        
-        logger.info(f"✅ Found {len(results)} results")
-        
-        return results
-    
-    def compare_strategies(self, query: str, n_results: int = 3) -> Dict[str, List[Dict]]:
-        """Compare different search strategies"""
         logger.info(f"\n{'='*70}")
-        logger.info(f"Comparing Strategies: '{query}'")
-        logger.info(f"{'='*70}")
+        logger.info(f"🔍 SEARCH: '{query}'")
+        logger.info(f"   Mode: {mode} | Top N: {top_n}")
+        logger.info('='*70)
         
-        strategies = {
-            "semantic": {},
-            "hybrid": {"alpha": 0.7},
-            "mmr": {"lambda_param": 0.7},
-            "bm25_heavy": {"alpha": 0.3}
+        if mode == 'parallel':
+            results = self._parallel_search(query, top_n)
+            strategy_used = 'parallel_fusion'
+        elif mode == 'fast':
+            results = self._fast_search(query, top_n)
+            strategy_used = 'semantic'
+        elif mode == 'accurate':
+            results = self._accurate_search(query, top_n)
+            strategy_used = 'hybrid+rerank'
+        else:
+            results = self._parallel_search(query, top_n)
+            strategy_used = 'parallel_fusion'
+        
+        execution_time = time.time() - start_time
+        
+        filtered_results = [r for r in results if r.confidence >= self.confidence_threshold]
+        
+        logger.info(f"\n✅ Search complete:")
+        logger.info(f"   Strategy: {strategy_used}")
+        logger.info(f"   Total candidates: {len(results)}")
+        logger.info(f"   After filtering (≥{self.confidence_threshold}): {len(filtered_results)}")
+        logger.info(f"   Execution time: {execution_time:.3f}s")
+        
+        if filtered_results:
+            avg_conf = sum(r.confidence for r in filtered_results) / len(filtered_results)
+            logger.info(f"   Avg confidence: {avg_conf:.3f}")
+        
+        metadata = {
+            'strategy': strategy_used,
+            'mode': mode,
+            'total_candidates': len(results),
+            'filtered_results': len(filtered_results),
+            'confidence_threshold': self.confidence_threshold,
+            'execution_time': execution_time
         }
         
-        comparison = {}
-        for strategy, params in strategies.items():
-            logger.info(f"\n{strategy.upper()}:")
-            results = self.search(
-                query,
-                n_results=n_results,
-                strategy=strategy,
-                strategy_params=params,
-                enable_reranking=False
+        if save_results and filtered_results:
+            result_file = self.tracker.save_results(
+                query=query,
+                results=filtered_results,
+                strategy_used=strategy_used,
+                execution_time=execution_time,
+                metadata=metadata
             )
-            comparison[strategy] = results
-            
-            if results:
-                top = results[0]
-                logger.info(f"   Score: {top.get('final_score', 0):.3f}")
-                logger.info(f"   {top['content'][:100]}...")
+            metadata['result_file'] = result_file
         
-        return comparison
+        return filtered_results, metadata
+    
+    def _parallel_search(self, query: str, top_n: int) -> List[SearchResult]:
+        """Run all strategies in parallel and fuse results"""
+        with PerformanceLogger("Parallel multi-strategy search"):
+            all_results = {}
+            
+            # Define strategies to run in parallel
+            strategy_funcs = {
+                'semantic': lambda: self.db_manager.search(query, n_results=top_n * 2),
+                'hybrid': lambda: self.strategies.hybrid_search(query, n_results=top_n * 2),
+                'mmr': lambda: self.strategies.mmr_search(query, n_results=top_n * 2),
+                'rerank': lambda: self.strategies.rerank_search(query, n_results=top_n * 2)
+            }
+            
+            # Execute in parallel
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_strategy = {
+                    executor.submit(func): strategy
+                    for strategy, func in strategy_funcs.items()
+                }
+                
+                for future in as_completed(future_to_strategy):
+                    strategy = future_to_strategy[future]
+                    try:
+                        results = future.result()
+                        
+                        for r in results:
+                            doc_id = r['id']
+                            if doc_id not in all_results:
+                                all_results[doc_id] = {
+                                    'content': r['content'],
+                                    'metadata': r['metadata'],
+                                    'scores': {},
+                                    'ranks': []
+                                }
+                            
+                            score_key = f"{strategy}_score"
+                            all_results[doc_id]['scores'][score_key] = r.get('final_score', 
+                                                                             r.get('similarity_score', 0))
+                            all_results[doc_id]['ranks'].append(r['rank'])
+                            
+                        logger.info(f"   ✓ {strategy}: {len(results)} results")
+                    except Exception as e:
+                        logger.warning(f"   ✗ {strategy} failed: {e}")
+            
+            # Fuse results using Reciprocal Rank Fusion
+            fused_results = []
+            for doc_id, data in all_results.items():
+                rrf_score = sum(1 / (60 + rank) for rank in data['ranks'])
+                data['scores']['fusion_score'] = rrf_score
+                
+                fused_results.append(
+                    SearchResult(
+                        content=data['content'],
+                        metadata=data['metadata'],
+                        scores=data['scores'],
+                        rank=0,
+                        query=query
+                    )
+                )
+            
+            fused_results.sort(key=lambda x: x.confidence, reverse=True)
+            
+            for i, result in enumerate(fused_results[:top_n * 2], 1):
+                result.rank = i
+            
+            logger.info(f"   ✓ Fusion complete: {len(fused_results)} unique results")
+            return fused_results[:top_n * 2]
+    
+    def _fast_search(self, query: str, top_n: int) -> List[SearchResult]:
+        """Fast semantic search"""
+        with PerformanceLogger("Fast search"):
+            raw_results = self.db_manager.search(query, n_results=top_n)
+        
+        return [
+            SearchResult(
+                content=r['content'],
+                metadata=r['metadata'],
+                scores={'semantic_score': r['similarity_score']},
+                rank=i+1,
+                query=query
+            )
+            for i, r in enumerate(raw_results)
+        ]
+    
+    def _accurate_search(self, query: str, top_n: int) -> List[SearchResult]:
+        """Accurate hybrid + rerank search"""
+        with PerformanceLogger("Accurate search"):
+            raw_results = self.strategies.rerank_search(
+                query,
+                n_results=top_n,
+                initial_results=self.strategies.hybrid_search(query, n_results=top_n * 2)
+            )
+        
+        return [
+            SearchResult(
+                content=r['content'],
+                metadata=r['metadata'],
+                scores={
+                    'hybrid_score': r.get('hybrid_score', 0),
+                    'rerank_score': r.get('rerank_score', 0)
+                },
+                rank=i+1,
+                query=query
+            )
+            for i, r in enumerate(raw_results)
+        ]
+    
+    def get_analytics(self) -> Dict:
+        """Get search analytics"""
+        return self.tracker.get_analytics()
+    
+    def export_for_nlp(self, result_id: str, format: str = 'context') -> Optional[str]:
+        """Export results for NLP"""
+        return self.tracker.export_for_nlp(result_id, format)
 
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 
 def load_documents_from_json(folder_path: str = "data/extracted") -> List[Dict]:
-    """
-    Load documents from JSON files
-    
-    Args:
-        folder_path: Path to extracted documents
-    
-    Returns:
-        List of document dicts
-    """
+    """Load documents from JSON files"""
     logger.info(f"\n📂 Loading from: {folder_path}")
     
     json_files = [f for f in Path(folder_path).glob("*.json") 
@@ -698,32 +810,40 @@ def load_documents_from_json(folder_path: str = "data/extracted") -> List[Dict]:
 
 if __name__ == "__main__":
     logger.info("="*70)
-    logger.info("Vector Search - Phase 1+2 Demo")
+    logger.info("RAG Search Engine - Demo")
     logger.info("="*70)
     
     # Initialize
-    chroma = ChromaDBManager()
-    collection = chroma.create_collection(reset=False)
+    db = ChromaDBManager()
+    collection = db.create_collection(reset=False)
     
     # Load documents if empty
     if collection.count() == 0:
         documents = load_documents_from_json()
         if documents:
-            chroma.add_documents(documents)
+            db.add_documents(documents)
     
     # Initialize search
-    search_engine = UnifiedSearchEngine(chroma, enable_routing=True)
+    search_engine = UnifiedSearchEngine(db, confidence_threshold=0.3)
     
-    # Test query
-    results = search_engine.search("What is machine learning?", n_results=3)
+    # Test parallel search
+    results, metadata = search_engine.search(
+        "What is machine learning?",
+        top_n=5,
+        mode='parallel'
+    )
     
     print(f"\n{'='*70}")
-    print("Search Results:")
+    print("SEARCH RESULTS")
     print('='*70)
     
     for result in results:
-        print(f"\n[{result['rank']}] Score: {result.get('final_score', 0):.3f}")
-        print(f"    {result['content']}")
-        print(f"    Metadata fields: {list(result['metadata'].keys())}")
+        print(f"\n[{result.rank}] Confidence: {result.confidence:.3f}")
+        print(f"Content: {result.content[:200]}...")
+        print(f"All Scores: {result.scores}")
     
-    logger.info("\n✅ Demo complete")
+    print(f"\n{'='*70}")
+    print("ANALYTICS")
+    print('='*70)
+    analytics = search_engine.get_analytics()
+    print(json.dumps(analytics, indent=2))
