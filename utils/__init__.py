@@ -1,24 +1,31 @@
-# utils/__init__.py
-"""Utility modules"""
-from .logger import get_logger, RAGLogger, ProgressLogger, PerformanceLogger
+"""
+Utils Package - Phase 1+2 Complete
+"""
+
+from .logger import get_logger, PerformanceLogger, ProgressLogger
 from .validators import (
-    FileValidator,
-    URLValidator,
     TextValidator,
     ConfigValidator,
     SourceValidator,
-    ValidationError
+    FileValidator,
+    URLValidator
 )
+from .metadata_manager import get_registry, DocumentRegistry
 
 __all__ = [
+    # Logger
     'get_logger',
-    'RAGLogger',
-    'ProgressLogger',
     'PerformanceLogger',
-    'FileValidator',
-    'URLValidator',
+    'ProgressLogger',
+    
+    # Validators
     'TextValidator',
     'ConfigValidator',
     'SourceValidator',
-    'ValidationError'
+    'FileValidator',
+    'URLValidator',
+    
+    # Metadata Manager
+    'get_registry',
+    'DocumentRegistry'
 ]

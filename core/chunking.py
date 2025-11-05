@@ -1,12 +1,11 @@
 """
-Advanced Chunking Module
+Chunking Module - Clean Production Version
 
 Provides multiple chunking strategies optimized for RAG systems.
-Enhanced with metadata enrichment and quality checks.
 """
 
 import re
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict
 from dataclasses import dataclass
 from collections import Counter
 
@@ -49,8 +48,8 @@ class Chunker:
     Strategies:
     1. sentence_aware: Respects sentence boundaries (best for general docs)
     2. semantic: Groups by topic similarity (best for long documents)
-    3. fixed_size: Fast, uniform chunks (best for speed-critical)
-    4. paragraph: Preserves document structure (best for structured docs)
+    3. fixed_size: Fast, uniform chunks (best for speed)
+    4. paragraph: Preserves structure (best for structured docs)
     5. recursive: Hierarchical chunking (best for complex documents)
     """
     
@@ -63,32 +62,27 @@ class Chunker:
         """
         self.config = config or CHUNKING
         
-        # Validate configuration
         ConfigValidator.validate_chunk_config(
             self.config.target_words,
             self.config.overlap_words,
             self.config.min_chunk_words
         )
         
-        logger.info(f"Initialized Chunker: {self.config.method}, "
-                   f"target={self.config.target_words}w, "
-                   f"overlap={self.config.overlap_words}w")
+        logger.info(f"✂️  Chunker initialized: {self.config.method}, "
+                   f"{self.config.target_words}w target")
     
     def chunk(self, text: str, method: Optional[str] = None) -> List[Chunk]:
         """
-        Chunk text using specified or configured method
+        Chunk text using specified method
         
         Args:
             text: Text to chunk
-            method: Override configured method (optional)
+            method: Override configured method
         
         Returns:
-            List of Chunk objects with metadata
+            List of Chunk objects
         """
-        # Validate input
-        text = TextValidator.validate_text(text, min_length=10, field_name="Text to chunk")
-        
-        # Select method
+        text = TextValidator.validate_text(text, min_length=10, field_name="Text")
         method = method or self.config.method
         
         with PerformanceLogger(f"Chunking ({method})"):
@@ -106,18 +100,11 @@ class Chunker:
                 logger.warning(f"Unknown method '{method}', using sentence_aware")
                 chunks = self._sentence_aware_chunk(text)
         
-        logger.info(f"Created {len(chunks)} chunks from {len(text)} chars")
+        logger.info(f"Created {len(chunks)} chunks from {len(text):,} chars")
         return chunks
     
     def _sentence_aware_chunk(self, text: str) -> List[Chunk]:
-        """
-        Sentence-aware chunking - best for general documents
-        
-        Advantages:
-        - Maintains semantic coherence
-        - Natural reading flow
-        - Good for Q&A retrieval
-        """
+        """Sentence-aware chunking - best for general documents"""
         sentences = self._split_sentences(text)
         
         if not sentences:
@@ -131,20 +118,15 @@ class Chunker:
         for sentence in sentences:
             sentence_words = len(sentence.split())
             
-            # Skip very short sentences
             if sentence_words < 3:
                 continue
             
-            # Check if adding this sentence exceeds target
             if current_words + sentence_words > self.config.target_words and current:
-                # Create chunk
                 chunk_text = ' '.join(current)
-                chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos, start_pos + len(chunk_text)))
+                chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos, 
+                                                start_pos + len(chunk_text)))
                 
-                # Get overlap sentences
                 overlap = self._get_overlap_sentences(current, self.config.overlap_words)
-                
-                # Start new chunk with overlap
                 current = overlap + [sentence]
                 current_words = sum(len(s.split()) for s in current)
                 start_pos += len(chunk_text) - len(' '.join(overlap))
@@ -152,22 +134,15 @@ class Chunker:
                 current.append(sentence)
                 current_words += sentence_words
         
-        # Add final chunk if it meets minimum size
         if current and current_words >= self.config.min_chunk_words:
             chunk_text = ' '.join(current)
-            chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos, start_pos + len(chunk_text)))
+            chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos, 
+                                            start_pos + len(chunk_text)))
         
         return chunks if chunks else [self._create_chunk(text, 0, 0, len(text))]
     
     def _semantic_chunk(self, text: str) -> List[Chunk]:
-        """
-        Semantic chunking - groups related content
-        
-        Advantages:
-        - Groups topically related content
-        - Reduces redundancy
-        - Good for diverse documents
-        """
+        """Semantic chunking - groups related content"""
         sentences = self._split_sentences(text)
         
         if not sentences:
@@ -177,15 +152,13 @@ class Chunker:
         current = []
         start_pos = 0
         
-        for i, sentence in enumerate(sentences):
+        for sentence in sentences:
             if not current:
                 current.append(sentence)
                 continue
             
-            # Calculate semantic similarity (simple word overlap)
             similarity = self._calculate_similarity(current[-1], sentence)
             
-            # Check if we should split
             should_split = (
                 similarity < self.config.similarity_threshold or
                 len(current) >= 5 or
@@ -194,28 +167,22 @@ class Chunker:
             
             if should_split and current:
                 chunk_text = ' '.join(current)
-                chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos, start_pos + len(chunk_text)))
+                chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos,
+                                                start_pos + len(chunk_text)))
                 start_pos += len(chunk_text)
                 current = [sentence]
             else:
                 current.append(sentence)
         
-        # Add final chunk
         if current:
             chunk_text = ' '.join(current)
-            chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos, start_pos + len(chunk_text)))
+            chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos,
+                                            start_pos + len(chunk_text)))
         
         return chunks if chunks else [self._create_chunk(text, 0, 0, len(text))]
     
     def _fixed_size_chunk(self, text: str) -> List[Chunk]:
-        """
-        Fixed-size chunking with overlap
-        
-        Advantages:
-        - Fastest method
-        - Predictable sizes
-        - Good for batch processing
-        """
+        """Fixed-size chunking with overlap"""
         words = text.split()
         
         if not words:
@@ -235,14 +202,7 @@ class Chunker:
         return chunks if chunks else [self._create_chunk(text, 0, 0, len(text))]
     
     def _paragraph_chunk(self, text: str) -> List[Chunk]:
-        """
-        Paragraph-based chunking
-        
-        Advantages:
-        - Preserves document structure
-        - Good for formatted documents
-        - Maintains author's intent
-        """
+        """Paragraph-based chunking"""
         paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
         
         if not paragraphs:
@@ -256,10 +216,10 @@ class Chunker:
         for para in paragraphs:
             para_words = len(para.split())
             
-            # Check if adding this paragraph exceeds target
             if current_words + para_words > self.config.target_words and current:
                 chunk_text = '\n\n'.join(current)
-                chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos, start_pos + len(chunk_text)))
+                chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos,
+                                                start_pos + len(chunk_text)))
                 start_pos += len(chunk_text)
                 current = [para]
                 current_words = para_words
@@ -267,54 +227,41 @@ class Chunker:
                 current.append(para)
                 current_words += para_words
         
-        # Add final chunk
         if current:
             chunk_text = '\n\n'.join(current)
-            chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos, start_pos + len(chunk_text)))
+            chunks.append(self._create_chunk(chunk_text, len(chunks), start_pos,
+                                            start_pos + len(chunk_text)))
         
         return chunks if chunks else [self._create_chunk(text, 0, 0, len(text))]
     
     def _recursive_chunk(self, text: str, depth: int = 0, max_depth: int = 2) -> List[Chunk]:
-        """
-        Recursive chunking - hierarchical splitting
-        
-        Advantages:
-        - Handles very large documents
-        - Preserves hierarchical structure
-        - Good for complex documents
-        """
-        # Base case: text is small enough
+        """Recursive chunking - hierarchical splitting"""
         word_count = len(text.split())
+        
         if word_count <= self.config.target_words or depth >= max_depth:
             return [self._create_chunk(text, 0, 0, len(text))]
         
-        # Try paragraph split first
         paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
         
         if len(paragraphs) > 1:
-            # Split at paragraph boundaries
             mid = len(paragraphs) // 2
             left_text = '\n\n'.join(paragraphs[:mid])
             right_text = '\n\n'.join(paragraphs[mid:])
         else:
-            # Split at sentence boundaries
             sentences = self._split_sentences(text)
             if len(sentences) > 1:
                 mid = len(sentences) // 2
                 left_text = ' '.join(sentences[:mid])
                 right_text = ' '.join(sentences[mid:])
             else:
-                # Force split at word boundary
                 words = text.split()
                 mid = len(words) // 2
                 left_text = ' '.join(words[:mid])
                 right_text = ' '.join(words[mid:])
         
-        # Recursively chunk each half
         left_chunks = self._recursive_chunk(left_text, depth + 1, max_depth)
         right_chunks = self._recursive_chunk(right_text, depth + 1, max_depth)
         
-        # Reindex chunks
         all_chunks = left_chunks + right_chunks
         for i, chunk in enumerate(all_chunks):
             chunk.index = i
@@ -322,10 +269,8 @@ class Chunker:
         return all_chunks
     
     def _create_chunk(self, text: str, index: int, start_pos: int, end_pos: int) -> Chunk:
-        """Create a Chunk object with metadata"""
+        """Create Chunk object with metadata"""
         sentences = self._split_sentences(text)
-        
-        # Extract keywords (top 5 most common words)
         words = [w.lower() for w in text.split() if len(w) > 3]
         keywords = [word for word, _ in Counter(words).most_common(5)]
         
@@ -345,16 +290,8 @@ class Chunker:
         )
     
     def _split_sentences(self, text: str) -> List[str]:
-        """
-        Split text into sentences with improved rules
-        
-        Handles:
-        - Standard punctuation (. ! ?)
-        - Abbreviations (Dr., Mr., etc.)
-        - Decimals (3.14)
-        - Multiple punctuation (!!)
-        """
-        # Replace common abbreviations temporarily
+        """Split text into sentences"""
+        # Replace common abbreviations
         text = re.sub(r'\b(Dr|Mr|Mrs|Ms|Prof|Sr|Jr|etc|vs|e\.g|i\.e)\.',
                      lambda m: m.group(0).replace('.', '<DOT>'), text)
         
@@ -367,7 +304,7 @@ class Chunker:
         return sentences
     
     def _get_overlap_sentences(self, sentences: List[str], overlap_words: int) -> List[str]:
-        """Get overlap sentences from end of list"""
+        """Get overlap sentences from end"""
         overlap = []
         word_count = 0
         
@@ -382,7 +319,7 @@ class Chunker:
         return overlap
     
     def _calculate_similarity(self, text1: str, text2: str) -> float:
-        """Calculate simple word overlap similarity"""
+        """Calculate word overlap similarity"""
         words1 = set(text1.lower().split())
         words2 = set(text2.lower().split())
         
@@ -413,35 +350,6 @@ class Chunker:
         }
 
 
-def chunk_text(text: str,
-               method: str = 'sentence_aware',
-               target_words: int = 150,
-               overlap_words: int = 30) -> List[str]:
-    """
-    Convenience function for simple chunking
-    
-    Args:
-        text: Text to chunk
-        method: Chunking method
-        target_words: Target chunk size
-        overlap_words: Overlap between chunks
-    
-    Returns:
-        List of chunk texts
-    """
-    config = ChunkingConfig(
-        method=method,
-        target_words=target_words,
-        overlap_words=overlap_words,
-        min_chunk_words=max(50, target_words // 3)
-    )
-    
-    chunker = Chunker(config)
-    chunks = chunker.chunk(text)
-    
-    return [chunk.text for chunk in chunks]
-
-
 if __name__ == "__main__":
     # Demo
     sample_text = """
@@ -454,7 +362,7 @@ if __name__ == "__main__":
     
     chunker = Chunker()
     
-    print("Testing different chunking methods:\n")
+    print("Testing Chunking Methods:\n")
     
     for method in ['sentence_aware', 'semantic', 'fixed_size', 'paragraph']:
         print(f"\n{'='*60}")
@@ -466,10 +374,7 @@ if __name__ == "__main__":
         for i, chunk in enumerate(chunks, 1):
             print(f"\nChunk {i} ({chunk.word_count} words):")
             print(f"  {chunk.text[:100]}...")
-            print(f"  Keywords: {', '.join(chunk.metadata['keywords'])}")
         
         stats = chunker.get_chunk_statistics(chunks)
-        print(f"\nStatistics:")
-        print(f"  Total chunks: {stats['total_chunks']}")
-        print(f"  Avg words: {stats['avg_word_count']:.1f}")
-        print(f"  Range: {stats['min_word_count']}-{stats['max_word_count']} words")
+        print(f"\nStats: {stats['total_chunks']} chunks, "
+              f"avg {stats['avg_word_count']:.1f} words")

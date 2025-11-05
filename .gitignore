@@ -154,6 +154,7 @@ chroma_db/
 data/extracted/
 extracted_docs/
 data/raw/
+data/registry/
 raw_docs/
 
 # Search results

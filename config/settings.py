@@ -1,90 +1,128 @@
 """
-Centralized Configuration for RAG System
+Centralized Configuration 
 
-All hyperparameters and settings in one place for easy tuning.
+All settings for RAG system with hierarchical metadata support.
 """
 
 import os
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Dict, Any
-
+from dataclasses import dataclass, field
+from typing import Dict, List
 
 # Base directories
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
-MODELS_DIR = BASE_DIR / "models" / "cache"
+LOGS_DIR = BASE_DIR / "logs"
 
 # Create directories
-for directory in [DATA_DIR / "raw", DATA_DIR / "extracted", DATA_DIR / "chroma_db", MODELS_DIR]:
-    directory.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(exist_ok=True)
+LOGS_DIR.mkdir(exist_ok=True)
+
+
+@dataclass
+class MetadataConfig:
+    """
+    Metadata management configuration
+    
+    Separates document-level vs chunk-level metadata to eliminate redundancy.
+    """
+    # Registry settings
+    registry_dir: str = str(DATA_DIR / "registry")
+    enable_registry: bool = True  # Use document registry system
+    
+    # Document-level fields (stored once per document)
+    document_fields: List[str] = field(default_factory=lambda: [
+        'title',
+        'url',
+        'domain',
+        'source_type',
+        'filename',
+        'extracted_at',
+        'extraction_method',
+        'total_pages',
+        'file_size',
+        'meta_description',
+        'status_code'
+    ])
+    
+    # Chunk-level fields (stored per chunk)
+    chunk_fields: List[str] = field(default_factory=lambda: [
+        'chunk_index',
+        'chunk_char_count',
+        'chunk_word_count',
+        'chunk_sentence_count',
+        'chunk_keywords',
+        'avg_sentence_length'
+    ])
+    
+    # Chunking summary fields (stored once per document)
+    chunking_fields: List[str] = field(default_factory=lambda: [
+        'chunking_method',
+        'chunking_target_words',
+        'chunking_overlap_words',
+        'total_chunks'
+    ])
+    
+    # Reconstruction settings
+    reconstruct_on_search: bool = True  # Rebuild full metadata on retrieval
 
 
 @dataclass
 class ChunkingConfig:
-    """Chunking configuration"""
-    method: str = "sentence_aware"  # sentence_aware, semantic, fixed_size, paragraph
-    target_words: int = 150  # Optimal for most LLMs (100-200 words)
-    overlap_words: int = 30  # 20% overlap recommended
-    min_chunk_words: int = 50  # Minimum viable chunk
-    max_chunk_words: int = 300  # Maximum before forced split
+    """Chunking strategy configuration"""
+    method: str = "sentence_aware"  # sentence_aware, semantic, fixed_size, paragraph, recursive
+    target_words: int = 150
+    overlap_words: int = 30
+    min_chunk_words: int = 50
+    max_chunk_words: int = 500
     
-    # Semantic chunking specific
-    similarity_threshold: float = 0.6  # Topic change detection
-    
-    # Paragraph chunking specific
-    max_paragraphs: int = 3
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'method': self.method,
-            'target_words': self.target_words,
-            'overlap_words': self.overlap_words,
-            'min_chunk_words': self.min_chunk_words
-        }
+    # Semantic chunking
+    similarity_threshold: float = 0.5
 
 
 @dataclass
 class EmbeddingConfig:
     """Embedding model configuration"""
-    # Model options (in order of quality/speed trade-off):
-    # - all-MiniLM-L6-v2: 384 dim, fastest, good quality
-    # - all-mpnet-base-v2: 768 dim, best quality/speed balance 
-    # - all-MiniLM-L12-v2: 384 dim, good balance
-    # - paraphrase-multilingual-MiniLM-L12-v2: 384 dim, multilingual
+    model_name: str = "all-mpnet-base-v2"  # Best quality/speed
+    dimension: int = 768
+    batch_size: int = 32
+    normalize_embeddings: bool = True
+    cache_dir: str = str(DATA_DIR / "models")
+
+
+@dataclass
+class DatabaseConfig:
+    """ChromaDB configuration"""
+    persist_directory: str = str(DATA_DIR / "chroma_db")
+    collection_name: str = "rag_documents"
+    batch_size: int = 100
+    distance_function: str = "l2"  # l2, cosine, ip
     
-    model_name: str = "all-mpnet-base-v2"
-    dimension: int = 768  # Auto-detected from model
-    batch_size: int = 32  # For batch encoding
-    normalize_embeddings: bool = True  # Better for cosine similarity
-    show_progress: bool = True
-    cache_dir: str = str(MODELS_DIR)
+    def get_collection_metadata(self) -> Dict:
+        """Get metadata for collection creation"""
+        return {
+            "hnsw:space": self.distance_function,
+            "description": "RAG documents with hierarchical metadata"
+        }
 
 
 @dataclass
 class SearchConfig:
     """Search configuration"""
-    default_top_k: int = 5  # Default results to return
-    max_top_k: int = 20  # Maximum allowed
+    default_top_k: int = 5
+    max_top_k: int = 50
     
-    # Hybrid search (BM25 + Vector)
-    hybrid_alpha: float = 0.7  # 0.7 = 70% vector, 30% BM25
-    hybrid_top_k: int = 10  # Retrieve more candidates for hybrid
+    # Hybrid search
+    hybrid_alpha: float = 0.7  # 0.0=pure BM25, 1.0=pure vector
     
-    # MMR (Maximal Marginal Relevance)
-    mmr_lambda: float = 0.7  # 0.7 = 70% relevance, 30% diversity
-    mmr_candidates_multiplier: int = 3  # Retrieve 3x candidates
+    # MMR search
+    mmr_lambda: float = 0.7  # 0.0=max diversity, 1.0=max relevance
+    mmr_candidates_multiplier: int = 3
     
     # Re-ranking
-    use_reranking: bool = True
-    rerank_top_k: int = 10  # Only rerank top-10 (expensive operation)
+    use_reranking: bool = False  # Disabled by default (slow)
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    
-    # Search routing (intelligent strategy selection)
-    enable_smart_routing: bool = True
-    
-    # Filtered search
-    enable_metadata_filters: bool = True
+    rerank_top_k: int = 20
 
 
 @dataclass
@@ -93,117 +131,80 @@ class ExtractionConfig:
     output_dir: str = str(DATA_DIR / "extracted")
     
     # Web scraping
-    use_scrapy: bool = True
-    follow_links: bool = False
-    max_pages_per_seed: int = 10
     download_timeout: int = 30
-    concurrent_requests: int = 2
-    download_delay: float = 1.0  # Polite crawling
+    download_delay: float = 0.5
+    concurrent_requests: int = 4
     retry_times: int = 2
     
     # File processing
-    batch_size: int = 100  # For bulk operations
-    
-    # PDF extraction
-    pdf_extract_images: bool = False  # Image text extraction (slower)
-    
-    # Excel/CSV
-    excel_max_rows: int = 10000  # Limit for large files
+    max_file_size_mb: int = 100
 
 
-@dataclass
-class DatabaseConfig:
-    """ChromaDB configuration"""
-    persist_directory: str = str(DATA_DIR / "chroma_db")
-    collection_name: str = "documents"
-    distance_metric: str = "cosine"  # cosine, l2, ip
-    
-    # HNSW index parameters (for faster search)
-    hnsw_space: str = "cosine"
-    hnsw_construction_ef: int = 100  # Higher = better recall, slower build
-    hnsw_search_ef: int = 100  # Higher = better recall, slower search
-    hnsw_m: int = 16  # Number of bi-directional links
-    
-    # Batch operations
-    batch_size: int = 100
-    
-    def get_collection_metadata(self) -> Dict[str, Any]:
-        """Get metadata for collection creation"""
-        return {
-            "hnsw:space": self.hnsw_space,
-            "hnsw:construction_ef": self.hnsw_construction_ef,
-            "hnsw:search_ef": self.hnsw_search_ef,
-            "hnsw:M": self.hnsw_m
-        }
-
-
-@dataclass
-class LoggingConfig:
-    """Logging configuration"""
-    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
-    log_format: str = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    log_date_format: str = "%Y-%m-%d %H:%M:%S"
-    log_to_file: bool = True
-    log_file: str = str(BASE_DIR / "logs" / "rag_system.log")
-    max_log_size: int = 10 * 1024 * 1024  # 10MB
-    backup_count: int = 5
-
-
-# Global configuration instances
+# Instantiate configs
+METADATA = MetadataConfig()
 CHUNKING = ChunkingConfig()
 EMBEDDING = EmbeddingConfig()
+DATABASE = DatabaseConfig()
 SEARCH = SearchConfig()
 EXTRACTION = ExtractionConfig()
-DATABASE = DatabaseConfig()
-LOGGING = LoggingConfig()
 
 
 # Query routing rules
 QUERY_ROUTING_RULES = {
-    "factual_keywords": ["what", "define", "definition", "meaning"],
-    "explanation_keywords": ["how", "why", "explain", "describe"],
-    "comparison_keywords": ["difference", "compare", "versus", "vs"],
-    "listing_keywords": ["list", "types", "kinds", "examples"],
+    'factual_keywords': ['what is', 'what are', 'define', 'definition'],
+    'explanation_keywords': ['how', 'why', 'explain', 'describe'],
+    'comparison_keywords': ['compare', 'difference', 'versus', 'vs'],
+    'listing_keywords': ['list', 'types of', 'examples of', 'kinds of']
 }
 
-
-# Search strategy mapping by query type
 SEARCH_STRATEGY_MAP = {
-    "factual": "hybrid",  # Need exact terms + semantic
-    "explanation": "mmr",  # Want diverse perspectives
-    "comparison": "semantic",  # Semantic understanding needed
-    "listing": "hybrid",  # Mix of keywords + meaning
-    "specific": "bm25_heavy",  # Exact match important
-    "general": "semantic",  # Pure semantic understanding
+    'factual': 'hybrid',
+    'explanation': 'mmr',
+    'comparison': 'semantic',
+    'listing': 'hybrid',
+    'general': 'semantic'
 }
 
 
-def get_config_summary() -> str:
-    """Get human-readable configuration summary"""
-    return f"""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║                  RAG SYSTEM CONFIGURATION                    ║
-    ╠══════════════════════════════════════════════════════════════╣
-    ║ 📊 Chunking:                                                 ║
-    ║    Method: {CHUNKING.method:<45} ║
-    ║    Target: {CHUNKING.target_words} words (overlap: {CHUNKING.overlap_words})                        ║
-    ║                                                              ║
-    ║ 🤖 Embeddings:                                               ║
-    ║    Model: {EMBEDDING.model_name:<46} ║
-    ║    Dimensions: {EMBEDDING.dimension}                                        ║
-    ║                                                              ║
-    ║ 🔍 Search:                                                   ║
-    ║    Default Top-K: {SEARCH.default_top_k}                                           ║
-    ║    Hybrid Alpha: {SEARCH.hybrid_alpha} (70% vector, 30% BM25)            ║
-    ║    MMR Lambda: {SEARCH.mmr_lambda} (70% relevance, 30% diversity)      ║
-    ║    Re-ranking: {'Enabled' if SEARCH.use_reranking else 'Disabled':<43} ║
-    ║                                                              ║
-    ║ 💾 Database:                                                 ║
-    ║    Location: {DATABASE.persist_directory[-35:]:<42} ║
-    ║    Collection: {DATABASE.collection_name:<44} ║
-    ╚══════════════════════════════════════════════════════════════╝
-    """
+def print_config_summary():
+    """Print configuration summary"""
+    print("\n" + "="*70)
+    print("RAG SYSTEM CONFIGURATION")
+    print("="*70)
+    
+    print("\n📊 METADATA (Phase 1+2):")
+    print(f"   Registry enabled: {METADATA.enable_registry}")
+    print(f"   Registry dir: {METADATA.registry_dir}")
+    print(f"   Document fields: {len(METADATA.document_fields)}")
+    print(f"   Chunk fields: {len(METADATA.chunk_fields)}")
+    
+    print("\n✂️  CHUNKING:")
+    print(f"   Method: {CHUNKING.method}")
+    print(f"   Target size: {CHUNKING.target_words} words")
+    print(f"   Overlap: {CHUNKING.overlap_words} words")
+    
+    print("\n🧠 EMBEDDING:")
+    print(f"   Model: {EMBEDDING.model_name}")
+    print(f"   Dimensions: {EMBEDDING.dimension}")
+    print(f"   Batch size: {EMBEDDING.batch_size}")
+    
+    print("\n💾 DATABASE:")
+    print(f"   Directory: {DATABASE.persist_directory}")
+    print(f"   Collection: {DATABASE.collection_name}")
+    print(f"   Distance: {DATABASE.distance_function}")
+    
+    print("\n🔍 SEARCH:")
+    print(f"   Default results: {SEARCH.default_top_k}")
+    print(f"   Hybrid alpha: {SEARCH.hybrid_alpha}")
+    print(f"   MMR lambda: {SEARCH.mmr_lambda}")
+    print(f"   Re-ranking: {SEARCH.use_reranking}")
+    
+    print("\n📥 EXTRACTION:")
+    print(f"   Output: {EXTRACTION.output_dir}")
+    print(f"   Timeout: {EXTRACTION.download_timeout}s")
+    
+    print("="*70 + "\n")
 
 
 if __name__ == "__main__":
-    print(get_config_summary())
+    print_config_summary()
