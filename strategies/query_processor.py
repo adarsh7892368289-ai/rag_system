@@ -1,84 +1,128 @@
 import re
 from typing import Dict, List
-from utils.helpers import STOPWORDS
 
 class QueryProcessor:
-    def __init__(self):
-        self.stopwords = STOPWORDS
-        self.synonyms = self._load_synonyms()
+    """Process and enhance search queries"""
     
-    def process(self, query: str) -> Dict[str, any]:
+    def __init__(self):
+        self.stopwords = {
+            'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been',
+            'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'
+        }
+    
+    def process(self, query: str) -> Dict:
+        """Process query and return cleaned and expanded versions"""
         cleaned = self._clean_query(query)
-        keywords = self._extract_keywords(cleaned)
         expanded = self._expand_query(cleaned)
-        query_type = self._detect_query_type(query)
+        keywords = self._extract_keywords(cleaned)
         
         return {
             'original': query,
             'cleaned': cleaned,
             'expanded': expanded,
-            'keywords': keywords,
-            'type': query_type
+            'keywords': keywords
         }
     
     def _clean_query(self, query: str) -> str:
-        query = query.lower().strip()
+        """Clean and normalize query"""
+        query = query.strip().lower()
         query = re.sub(r'[^\w\s]', ' ', query)
-        query = re.sub(r'\s+', ' ', query)
-        
-        words = query.split()
-        words = [w for w in words if w not in self.stopwords]
-        query = ' '.join(words)
-        
+        query = ' '.join(query.split())
         return query
     
-    def _extract_keywords(self, query: str) -> List[str]:
-        words = query.split()
-        return [w for w in words if len(w) > 2]
-    
     def _expand_query(self, query: str) -> str:
+        """Expand query with synonyms (basic implementation)"""
+        expansions = {
+            'ml': 'machine learning',
+            'ai': 'artificial intelligence',
+            'dl': 'deep learning',
+            'nn': 'neural network',
+            'nlp': 'natural language processing',
+            'cv': 'computer vision'
+        }
+        
         words = query.split()
         expanded_words = []
         
         for word in words:
-            expanded_words.append(word)
-            if word in self.synonyms:
-                expanded_words.extend(self.synonyms[word])
+            if word in expansions:
+                expanded_words.extend([word, expansions[word]])
+            else:
+                expanded_words.append(word)
         
         return ' '.join(expanded_words)
     
-    def _detect_query_type(self, query: str) -> str:
-        query_lower = query.lower()
-        
-        if any(word in query_lower for word in ['how to', 'how do', 'how can']):
-            return 'how_to'
-        elif any(word in query_lower for word in ['what is', 'define', 'definition']):
-            return 'definition'
-        elif any(word in query_lower for word in ['compare', 'difference', 'vs', 'versus']):
-            return 'comparison'
-        elif any(word in query_lower for word in ['why', 'reason', 'cause']):
-            return 'explanation'
-        else:
-            return 'factual'
+    def _extract_keywords(self, query: str) -> List[str]:
+        """Extract important keywords from query"""
+        words = query.split()
+        keywords = [w for w in words if w not in self.stopwords and len(w) > 2]
+        return keywords
+
+
+class QueryRouter:
+    """Automatically route queries to optimal search strategies"""
     
-    def _load_synonyms(self) -> Dict[str, List[str]]:
-        return {
-            'car': ['vehicle', 'automobile'],
-            'fix': ['repair', 'solve', 'correct'],
-            'computer': ['pc', 'machine', 'system'],
-            'phone': ['mobile', 'smartphone', 'device'],
-            'fast': ['quick', 'rapid', 'speedy'],
-            'slow': ['sluggish', 'gradual'],
-            'big': ['large', 'huge', 'massive'],
-            'small': ['tiny', 'little', 'compact'],
-            'good': ['great', 'excellent', 'quality'],
-            'bad': ['poor', 'terrible', 'awful'],
-            'help': ['assist', 'support', 'aid'],
-            'issue': ['problem', 'error', 'bug'],
-            'start': ['begin', 'launch', 'initiate'],
-            'stop': ['halt', 'cease', 'end'],
-            'buy': ['purchase', 'acquire', 'get'],
-            'sell': ['market', 'trade'],
-            'work': ['function', 'operate', 'run'],
-            'break': ['damage', 'malfunction', 'fail']
+    @staticmethod
+    def detect_query_type(query: str) -> str:
+        """
+        Detect query type based on patterns
+        
+        Returns:
+            Query type: 'how-to', 'definition', 'comparison', 'list', 'keyword', 'general'
+        """
+        query_lower = query.lower().strip()
+        
+        # How-to questions
+        if any(query_lower.startswith(phrase) for phrase in [
+            'how to', 'how do', 'how can', 'how does', 'how should'
+        ]):
+            return 'how-to'
+        
+        # Definition questions
+        if any(query_lower.startswith(phrase) for phrase in [
+            'what is', 'what are', 'define', 'explain', 'describe'
+        ]):
+            return 'definition'
+        
+        # Comparison questions
+        if any(word in query_lower for word in [
+            'compare', 'difference', 'versus', 'vs', 'better', 'differ'
+        ]):
+            return 'comparison'
+        
+        # List/enumeration questions
+        if any(query_lower.startswith(phrase) for phrase in [
+            'list', 'enumerate', 'what are the', 'name the'
+        ]):
+            return 'list'
+        
+        # Short keyword queries (3 words or less)
+        if len(query.split()) <= 3:
+            return 'keyword'
+        
+        return 'general'
+    
+    @staticmethod
+    def route_query(query: str) -> str:
+        """
+        Route query to optimal search strategy based on type
+        
+        Returns:
+            Search mode: 'semantic', 'hybrid', 'parallel', 'rerank', 'mmr', 'bm25'
+        """
+        query_type = QueryRouter.detect_query_type(query)
+        
+        # Routing map: query type -> search strategy
+        routing_map = {
+            'how-to': 'rerank',        # Complex understanding needed
+            'definition': 'semantic',   # Conceptual similarity
+            'comparison': 'parallel',   # Multiple perspectives helpful
+            'list': 'mmr',             # Diversity important
+            'keyword': 'hybrid',        # Balance keyword + semantic
+            'general': 'parallel'       # Best overall performance
         }
+        
+        mode = routing_map.get(query_type, 'parallel')
+        print(f"🧭 Query type: '{query_type}' → Routing to: '{mode}'")
+        
+        return mode

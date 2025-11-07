@@ -7,6 +7,15 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+import json
+import hashlib
+from pathlib import Path
+from typing import List, Dict
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from bs4 import BeautifulSoup
@@ -31,11 +40,14 @@ class Document:
         return asdict(self)
 
 class DocumentExtractor:
+    """Extract and process documents from multiple sources"""
+    
     def __init__(self):
         self.chunker = DocumentChunker()
         os.makedirs(EXTRACTION.output_dir, exist_ok=True)
     
     def extract_multiple(self, sources: List[str], chunk: bool = True, parallel: bool = True) -> List[Document]:
+        """Extract from multiple sources (URLs and files)"""
         urls = [s for s in sources if s.startswith(('http://', 'https://'))]
         files = [s for s in sources if not s.startswith(('http://', 'https://'))]
         
@@ -62,6 +74,7 @@ class DocumentExtractor:
         return all_documents
     
     def _process_files_sequential(self, files: List[str], chunk: bool) -> List[Document]:
+        """Process files sequentially"""
         print(f"\n📁 Processing {len(files)} file(s)...")
         all_docs = []
         
@@ -77,6 +90,7 @@ class DocumentExtractor:
         return all_docs
     
     def _process_files_parallel(self, files: List[str], chunk: bool) -> List[Document]:
+        """Process files in parallel"""
         print(f"\n📁 Parallel processing {len(files)} file(s)...")
         all_docs = []
         
@@ -98,10 +112,12 @@ class DocumentExtractor:
         return all_docs
     
     def _extract_and_convert(self, file_path: str, chunk: bool) -> List[Document]:
+        """Extract and convert a single file"""
         raw_docs = self._extract_file(file_path)
         return self._convert_to_documents(raw_docs, chunk)
     
     def _extract_file(self, file_path: str) -> List[Dict]:
+        """Extract content from a file"""
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -125,6 +141,7 @@ class DocumentExtractor:
         return extractors[ext](str(path))
     
     def _convert_to_documents(self, raw_docs: List[Dict], do_chunk: bool) -> List[Document]:
+        """Convert raw documents to Document objects with chunking"""
         documents = []
         
         for raw_doc in raw_docs:
@@ -165,6 +182,7 @@ class DocumentExtractor:
         return documents
     
     def _generate_doc_id(self, source: str) -> str:
+        """Generate unique document ID from source"""
         source_hash = hashlib.md5(source.encode()).hexdigest()[:12]
         
         if source.startswith(('http://', 'https://')):
@@ -175,6 +193,7 @@ class DocumentExtractor:
             return f"file_{filename}_{source_hash}"
     
     def _extract_web(self, url: str) -> List[Dict]:
+        """Extract content from web page"""
         headers = {'User-Agent': EXTRACTION.user_agent}
         response = requests.get(url, headers=headers, timeout=EXTRACTION.timeout)
         response.raise_for_status()
@@ -203,6 +222,7 @@ class DocumentExtractor:
         }]
     
     def _extract_pdf(self, file_path: str) -> List[Dict]:
+        """Extract text from PDF"""
         with pdfplumber.open(file_path) as pdf:
             text = '\n\n'.join([p.extract_text() for p in pdf.pages if p.extract_text()])
             
@@ -218,6 +238,7 @@ class DocumentExtractor:
             }]
     
     def _extract_excel(self, file_path: str) -> List[Dict]:
+        """Extract data from Excel file"""
         documents = []
         excel_file = pd.ExcelFile(file_path)
         
@@ -243,6 +264,7 @@ class DocumentExtractor:
         return documents
     
     def _extract_csv(self, file_path: str) -> List[Dict]:
+        """Extract data from CSV file"""
         df = pd.read_csv(file_path)
         text_lines = [' | '.join(str(col) for col in df.columns)]
         text_lines.extend([' | '.join(str(val) for val in row.values) 
@@ -261,6 +283,7 @@ class DocumentExtractor:
         }]
     
     def _extract_word(self, file_path: str) -> List[Dict]:
+        """Extract text from Word document"""
         doc = DocxDocument(file_path)
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         text = '\n\n'.join(paragraphs)
@@ -276,6 +299,7 @@ class DocumentExtractor:
         }]
     
     def _extract_pptx(self, file_path: str) -> List[Dict]:
+        """Extract text from PowerPoint presentation"""
         prs = Presentation(file_path)
         all_text = []
         
@@ -301,6 +325,7 @@ class DocumentExtractor:
         }]
     
     def _extract_txt(self, file_path: str) -> List[Dict]:
+        """Extract text from plain text file"""
         with open(file_path, 'r', encoding='utf-8') as f:
             text = f.read()
         
@@ -312,6 +337,7 @@ class DocumentExtractor:
         }]
     
     def _extract_json(self, file_path: str) -> List[Dict]:
+        """Extract content from JSON file"""
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
@@ -325,19 +351,22 @@ class DocumentExtractor:
         }]
     
     def save_documents(self, documents: List[Document]):
+        """Save extracted documents to JSON files with unique filenames"""
         if not documents:
             return
         
         print(f"\n💾 Saving to '{EXTRACTION.output_dir}/'")
         
+        # Group documents by source
         docs_by_source = {}
         for doc in documents:
             if doc.source not in docs_by_source:
                 docs_by_source[doc.source] = []
             docs_by_source[doc.source].append(doc)
         
+        # Save each source to a unique file
         for source, docs in docs_by_source.items():
-            filename = self._generate_filename(source, docs[0].source_type)
+            filename = self._generate_unique_filename(source, docs[0].source_type)
             filepath = os.path.join(EXTRACTION.output_dir, filename)
             
             file_data = {
@@ -353,12 +382,36 @@ class DocumentExtractor:
             
             print(f"   ✓ {filename} ({len(docs)} chunks)")
     
-    def _generate_filename(self, source: str, source_type: str) -> str:
+    def _generate_unique_filename(self, source: str, source_type: str) -> str:
+        """
+        Generate unique filename using source hash to prevent duplicates
+        
+        Format: {type}_{domain/filename}_{timestamp}_{hash}.json
+        """
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Create unique hash from full source URL/path
+        source_hash = hashlib.md5(source.encode()).hexdigest()[:8]
+        
         if source.startswith(('http://', 'https://')):
-            domain = urlparse(source).netloc.replace('www.', '')
-            base_name = domain
+            # Web source: extract domain and page identifier
+            parsed = urlparse(source)
+            domain = parsed.netloc.replace('www.', '')
+            
+            # Get page identifier from path
+            path_parts = [p for p in parsed.path.split('/') if p]
+            page_id = path_parts[-1] if path_parts else 'index'
+            page_id = page_id.replace('.html', '').replace('.php', '')[:30]
+            
+            base_name = f"{domain}_{page_id}" if page_id != 'index' else domain
         else:
+            # File source: use filename
             base_name = Path(source).stem
         
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        return f"{source_type}_{base_name}_{timestamp}.json"
+        # Sanitize filename
+        base_name = "".join(c if c.isalnum() or c in '._-' else '_' for c in base_name)
+        
+        # Combine: type_basename_timestamp_hash.json
+        filename = f"{source_type}_{base_name}_{timestamp}_{source_hash}.json"
+        
+        return filename

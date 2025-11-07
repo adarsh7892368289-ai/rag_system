@@ -1,185 +1,213 @@
+import time
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from sklearn.metrics.pairwise import cosine_similarity
-from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder
 from config.settings import SEARCH
 
-class AdvancedSearchStrategies:
-    def __init__(self, db_manager):
+class UnifiedSearchEngine:
+    """Unified search engine with uniform scoring across all modes"""
+    
+    def __init__(self, db_manager, strategies):
         self.db_manager = db_manager
-        self.cross_encoder = None
-        self.bm25 = None
+        self.strategies = strategies
     
-    def semantic_search(self, query: str, n_results: int = 5) -> List[Dict]:
-        results = self.db_manager.search(query, n_results=n_results)
-        for r in results:
+    def search(self, query: str, top_n: int = None, mode: str = None, auto_route: bool = False) -> List[Dict]:
+        """Execute search with uniform scoring"""
+        if top_n is None:
+            top_n = SEARCH.top_k
+        
+        # Auto-route if enabled
+        if mode is None:
+            if auto_route:
+                from strategies.query_processor import QueryRouter
+                mode = QueryRouter.route_query(query)
+            else:
+                mode = SEARCH.default_mode
+        
+        start_time = time.time()
+        
+        # Execute search based on mode
+        if mode == 'parallel':
+            results = self._parallel_search(query, top_n)
+        elif mode == 'fast':
+            results = self._fast_search(query, top_n)
+        elif mode == 'accurate':
+            results = self._accurate_search(query, top_n)
+        elif mode == 'semantic':
+            results = self.strategies.semantic_search(query, top_n)
+        elif mode == 'hybrid':
+            results = self.strategies.hybrid_search(query, top_n)
+        elif mode == 'bm25':
+            results = self.strategies.bm25_search(query, top_n)
+        elif mode == 'mmr':
+            results = self.strategies.mmr_search(query, top_n)
+        elif mode == 'rerank':
+            results = self.strategies.rerank_search(query, top_n)
+        else:
+            results = self._parallel_search(query, top_n)
+        
+        execution_time = time.time() - start_time
+        
+        # Apply threshold
+        threshold = SEARCH.confidence_thresholds.get(mode, SEARCH.default_confidence_threshold)
+        filtered_results = [
+            r for r in results
+            if r.get('confidence', r.get('final_score', 0)) >= threshold
+        ]
+
+        # Add search technique to results
+        for result in filtered_results:
+            result['search_technique'] = mode
+            result['execution_time'] = execution_time
+
+        return filtered_results
+    
+    def _parallel_search(self, query: str, top_n: int) -> List[Dict]:
+        """Execute multiple strategies in parallel with improved fusion"""
+        all_results = {}
+        strategy_results = {}
+        
+        strategy_funcs = {
+            'semantic': lambda: self.strategies.semantic_search(query, n_results=top_n * 2),
+            'hybrid': lambda: self.strategies.hybrid_search(query, n_results=top_n * 2),
+            'mmr': lambda: self.strategies.mmr_search(query, n_results=top_n * 2),
+        }
+        
+        if SEARCH.enable_reranking:
+            strategy_funcs['rerank'] = lambda: self.strategies.rerank_search(query, n_results=top_n * 2)
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_strategy = {
+                executor.submit(func): strategy
+                for strategy, func in strategy_funcs.items()
+            }
+            
+            for future in as_completed(future_to_strategy):
+                strategy = future_to_strategy[future]
+                try:
+                    results = future.result()
+                    strategy_results[strategy] = results
+                    
+                    for r in results:
+                        doc_id = r['id']
+                        if doc_id not in all_results:
+                            all_results[doc_id] = {
+                                'id': doc_id,
+                                'content': r['content'],
+                                'metadata': r['metadata'],
+                                'scores': {},
+                                'ranks': []
+                            }
+                        
+                        # Store the final_score from each strategy
+                        score_key = f"{strategy}_score"
+                        all_results[doc_id]['scores'][score_key] = r.get('final_score', 
+                                                                         r.get('similarity_score', 0))
+                        all_results[doc_id]['ranks'].append(r['rank'])
+                
+                except Exception as e:
+                    print(f"⚠️  Strategy '{strategy}' failed: {e}")
+        
+        # Fuse results using improved RRF + score combination
+        fused_results = self._advanced_fusion(all_results)
+        return fused_results[:top_n * 2]
+    
+    def _fast_search(self, query: str, top_n: int) -> List[Dict]:
+        """Fast semantic search"""
+        raw_results = self.strategies.semantic_search(query, n_results=top_n)
+        for r in raw_results:
+            r['confidence'] = r['similarity_score']
             r['final_score'] = r['similarity_score']
-        return results
+        return raw_results
     
-    def bm25_search(self, query: str, n_results: int = 5) -> List[Dict]:
-        if not self.bm25:
-            self._initialize_bm25()
-        
-        if not self.bm25:
-            return []
-        
-        query_tokens = query.lower().split()
-        bm25_scores = self.bm25.get_scores(query_tokens)
-        
-        top_indices = np.argsort(bm25_scores)[::-1][:n_results]
-        
-        results = []
-        for rank, idx in enumerate(top_indices, 1):
-            doc = self.db_manager.documents_cache[idx]
-            results.append({
-                'id': doc['id'],
-                'content': doc['content'],
-                'metadata': doc.get('metadata', {}),
-                'bm25_score': float(bm25_scores[idx]),
-                'final_score': float(bm25_scores[idx]),
-                'rank': rank,
-                'query': query
-            })
-        
-        return results
-    
-    def hybrid_search(self, query: str, n_results: int = 5, alpha: float = None) -> List[Dict]:
-        if alpha is None:
-            alpha = SEARCH.hybrid_alpha
-        
-        if not self.bm25:
-            self._initialize_bm25()
-        
-        vector_results = self.db_manager.search(query, n_results=n_results * 2)
-        
-        if not vector_results or not self.bm25:
-            return vector_results[:n_results]
-        
-        query_tokens = query.lower().split()
-        bm25_scores = self.bm25.get_scores(query_tokens)
-        
-        max_bm25 = max(bm25_scores) if bm25_scores.size > 0 else 1
-        min_bm25 = min(bm25_scores) if bm25_scores.size > 0 else 0
-        
-        hybrid_results = []
-        for result in vector_results:
-            doc_idx = next(
-                (i for i, doc in enumerate(self.db_manager.documents_cache)
-                 if doc['id'] == result['id']),
-                None
-            )
-            
-            if doc_idx is not None:
-                bm25_score = ((bm25_scores[doc_idx] - min_bm25) / (max_bm25 - min_bm25) 
-                             if max_bm25 > min_bm25 else 0)
-                vector_score = result['similarity_score']
-                
-                hybrid_score = alpha * vector_score + (1 - alpha) * bm25_score
-                
-                result['bm25_score'] = float(bm25_score)
-                result['vector_score'] = float(vector_score)
-                result['hybrid_score'] = float(hybrid_score)
-                result['final_score'] = float(hybrid_score)
-                hybrid_results.append(result)
-        
-        hybrid_results.sort(key=lambda x: x['hybrid_score'], reverse=True)
-        
-        for i, result in enumerate(hybrid_results[:n_results], 1):
-            result['rank'] = i
-        
-        return hybrid_results[:n_results]
-    
-    def mmr_search(self, query: str, n_results: int = 5, lambda_param: float = None) -> List[Dict]:
-        if lambda_param is None:
-            lambda_param = SEARCH.mmr_lambda
-        
-        candidates = self.db_manager.search(
+    def _accurate_search(self, query: str, top_n: int) -> List[Dict]:
+        """Accurate search using hybrid + reranking"""
+        raw_results = self.strategies.rerank_search(
             query,
-            n_results=min(n_results * SEARCH.mmr_candidates_multiplier, SEARCH.max_top_k)
+            n_results=top_n,
+            initial_results=self.strategies.hybrid_search(query, n_results=top_n * 2)
         )
+        for r in raw_results:
+            r['confidence'] = r.get('rerank_score', r.get('hybrid_score', 0))
+        return raw_results
+    
+    def _advanced_fusion(self, all_results: Dict) -> List[Dict]:
+        """
+        Advanced fusion combining RRF and score averaging
         
-        if not candidates:
-            return []
+        This ensures parallel search produces scores in the same range as other methods
+        """
+        fused_results = []
         
-        candidate_texts = [c['content'] for c in candidates]
-        candidate_embeddings = self.db_manager.embedding_model.encode_batch(candidate_texts)
-        
-        selected = []
-        selected_embeddings = []
-        remaining = list(range(len(candidates)))
-        
-        selected.append(0)
-        selected_embeddings.append(candidate_embeddings[0])
-        remaining.remove(0)
-        
-        while len(selected) < n_results and remaining:
-            best_score = -float('inf')
-            best_idx = None
+        for doc_id, data in all_results.items():
+            # Calculate RRF score (rank-based)
+            rrf_score = sum(1 / (60 + rank) for rank in data['ranks'])
             
-            for idx in remaining:
-                relevance = candidates[idx]['similarity_score']
-                
-                candidate_emb = candidate_embeddings[idx].reshape(1, -1)
-                selected_embs = np.array(selected_embeddings)
-                similarities = cosine_similarity(candidate_emb, selected_embs)[0]
-                max_sim = float(np.max(similarities))
-                
-                mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
-                
-                if mmr_score > best_score:
-                    best_score = mmr_score
-                    best_idx = idx
+            # Calculate average score across strategies (score-based)
+            strategy_scores = list(data['scores'].values())
+            avg_score = np.mean(strategy_scores) if strategy_scores else 0
             
-            if best_idx is not None:
-                selected.append(best_idx)
-                selected_embeddings.append(candidate_embeddings[best_idx])
-                remaining.remove(best_idx)
+            # Combine RRF and average score (weighted)
+            # RRF gives better relative ranking, avg_score maintains absolute scale
+            data['raw_rrf_score'] = rrf_score
+            data['avg_strategy_score'] = avg_score
+            fused_results.append(data)
         
-        mmr_results = [candidates[i] for i in selected]
-        for i, result in enumerate(mmr_results, 1):
-            result['mmr_score'] = result['similarity_score']
-            result['final_score'] = result['similarity_score']
+        if fused_results:
+            # Normalize RRF scores to [0, 1]
+            rrf_scores = [r['raw_rrf_score'] for r in fused_results]
+            max_rrf = max(rrf_scores)
+            min_rrf = min(rrf_scores)
+            
+            for result in fused_results:
+                # Normalize RRF
+                if max_rrf > min_rrf:
+                    normalized_rrf = (result['raw_rrf_score'] - min_rrf) / (max_rrf - min_rrf)
+                else:
+                    normalized_rrf = 0.5
+                
+                # Combine normalized RRF (70%) with average score (30%)
+                # This preserves the score range of individual strategies
+                combined_score = 0.7 * normalized_rrf + 0.3 * result['avg_strategy_score']
+                
+                result['confidence'] = combined_score
+                result['final_score'] = combined_score
+        
+        # Sort by combined score
+        fused_results.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Update ranks
+        for i, result in enumerate(fused_results, 1):
             result['rank'] = i
         
-        return mmr_results
+        return fused_results
     
-    def rerank_search(self, query: str, n_results: int = 5,
-                     initial_results: Optional[List[Dict]] = None) -> List[Dict]:
-        if initial_results is None:
-            initial_results = self.db_manager.search(
-                query,
-                n_results=min(SEARCH.rerank_top_k, SEARCH.max_top_k)
-            )
+    def _reciprocal_rank_fusion(self, all_results: Dict) -> List[Dict]:
+        """Original RRF implementation (kept for compatibility)"""
+        fused_results = []
         
-        if not initial_results:
-            return []
+        for doc_id, data in all_results.items():
+            rrf_score = sum(1 / (60 + rank) for rank in data['ranks'])
+            data['raw_rrf_score'] = rrf_score
+            fused_results.append(data)
         
-        if not self.cross_encoder:
-            print(f"🔄 Loading Cross-Encoder: {SEARCH.rerank_model}")
-            self.cross_encoder = CrossEncoder(SEARCH.rerank_model)
+        if fused_results:
+            raw_scores = [r['raw_rrf_score'] for r in fused_results]
+            max_rrf = max(raw_scores)
+            min_rrf = min(raw_scores)
+            
+            for result in fused_results:
+                if max_rrf > min_rrf:
+                    normalized = (result['raw_rrf_score'] - min_rrf) / (max_rrf - min_rrf)
+                else:
+                    normalized = 0.5
+                
+                result['confidence'] = normalized
+                result['final_score'] = normalized
         
-        pairs = [[query, result['content']] for result in initial_results]
-        scores = self.cross_encoder.predict(pairs)
+        fused_results.sort(key=lambda x: x['confidence'], reverse=True)
         
-        for i, result in enumerate(initial_results):
-            result['rerank_score'] = float(scores[i])
-            result['final_score'] = float(scores[i])
-        
-        reranked = sorted(initial_results, key=lambda x: x['rerank_score'], reverse=True)
-        
-        for i, result in enumerate(reranked[:n_results], 1):
+        for i, result in enumerate(fused_results, 1):
             result['rank'] = i
         
-        return reranked[:n_results]
-    
-    def _initialize_bm25(self):
-        if not self.db_manager.documents_cache:
-            return
-        
-        print("🔄 Building BM25 index...")
-        corpus = [doc['content'] for doc in self.db_manager.documents_cache]
-        tokenized_corpus = [doc.lower().split() for doc in corpus]
-        self.bm25 = BM25Okapi(tokenized_corpus)
-        print(f"✅ BM25 index built")
+        return fused_results
