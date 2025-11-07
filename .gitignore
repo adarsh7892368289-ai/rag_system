@@ -183,6 +183,7 @@ data/raw/*
 !documents/.gitkeep
 
 # Model cache
+data/models/
 models/
 .cache/
 huggingface/
