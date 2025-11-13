@@ -103,7 +103,7 @@ class QueryRouter:
         return 'general'
     
     @staticmethod
-    def route_query(query: str) -> str:
+    def route(query: str) -> str:
         """
         Route query to optimal search strategy based on type
         

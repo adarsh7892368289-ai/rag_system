@@ -1,110 +1,111 @@
 import numpy as np
 from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.metrics.pairwise import cosine_similarity
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 from config.settings import SEARCH
+from scoring.scorer import UnifiedScorer
+from strategies.fusion import ResultFusion
+
 
 class AdvancedSearchStrategies:
-    """Advanced search strategies with uniform score normalization"""
     
     def __init__(self, db_manager):
         self.db_manager = db_manager
-        
-        # Cache models and indices
+        self.scorer = UnifiedScorer()
+        self.fusion = ResultFusion(db_manager.embedding_model)
         self._cross_encoder = None
         self._bm25_index = None
         self._bm25_corpus_hash = None
-        
+    
     @property
     def cross_encoder(self):
-        """Lazy load and cache cross-encoder model"""
         if self._cross_encoder is None:
-            print(f"🔄 Loading Cross-Encoder: {SEARCH.rerank_model}")
             self._cross_encoder = CrossEncoder(SEARCH.rerank_model)
-            print("✅ Cross-Encoder loaded and cached")
         return self._cross_encoder
     
     @property
     def bm25(self):
-        """Lazy load and cache BM25 index"""
         current_hash = self._get_corpus_hash()
         
         if self._bm25_index is None or self._bm25_corpus_hash != current_hash:
-            print("🔄 Building BM25 index...")
             corpus = [doc['content'] for doc in self.db_manager.documents_cache]
             tokenized_corpus = [doc.lower().split() for doc in corpus]
             self._bm25_index = BM25Okapi(tokenized_corpus)
             self._bm25_corpus_hash = current_hash
-            print(f"✅ BM25 index built ({len(corpus)} documents)")
         
         return self._bm25_index
     
-    def _get_corpus_hash(self):
-        """Get hash of current corpus for cache validation"""
-        return len(self.db_manager.documents_cache)
-    
     def semantic_search(self, query: str, n_results: int = 5) -> List[Dict]:
-        """Pure vector similarity search - scores naturally in [0,1] range"""
-        results = self.db_manager.search(query, n_results=n_results)
+        """Pure vector similarity search"""
+        raw_results = self.db_manager.search(query, n_results=n_results * 2)
         
-        # Cosine similarity is already [0,1], but often concentrated in [0.5, 0.9]
-        # No additional normalization needed - this is our baseline
-        for r in results:
-            r['final_score'] = r['similarity_score']
+        for result in raw_results:
+            result['final_score'] = self.scorer.compute_final_score(
+                base_score=result['similarity_score'],
+                metadata=result['metadata'],
+                query=query
+            )
         
-        return results
+        raw_results.sort(key=lambda x: x['final_score'], reverse=True)
+        diverse_results = self._diversify_results(raw_results)
+        
+        return diverse_results[:n_results]
     
     def bm25_search(self, query: str, n_results: int = 5) -> List[Dict]:
-        """Keyword-based BM25 search with normalized scores"""
+        """Keyword-based search using BM25"""
         if not self.db_manager.documents_cache:
             return []
         
         query_tokens = query.lower().split()
         bm25_scores = self.bm25.get_scores(query_tokens)
+        normalized_scores = self.scorer.normalize_bm25(bm25_scores)
         
-        # Normalize BM25 scores to match semantic search range
-        # BM25 scores are unbounded, so we use percentile-based normalization
-        normalized_scores = self._percentile_normalize(bm25_scores)
-        
-        # Get top N results
-        top_indices = np.argsort(bm25_scores)[::-1][:n_results]
+        top_indices = np.argsort(bm25_scores)[::-1][:n_results * 2]
         
         results = []
-        for rank, idx in enumerate(top_indices, 1):
+        for idx in top_indices:
             doc = self.db_manager.documents_cache[idx]
+            base_score = float(normalized_scores[idx])
+            
+            final_score = self.scorer.compute_final_score(
+                base_score=base_score,
+                metadata=doc.get('metadata', {}),
+                query=query
+            )
+            
             results.append({
                 'id': doc['id'],
                 'content': doc['content'],
                 'metadata': doc.get('metadata', {}),
-                'bm25_score': float(normalized_scores[idx]),
-                'final_score': float(normalized_scores[idx]),
-                'rank': rank,
+                'bm25_score': base_score,
+                'final_score': final_score,
                 'query': query
             })
         
-        return results
+        results.sort(key=lambda x: x['final_score'], reverse=True)
+        diverse_results = self._diversify_results(results)
+        
+        return diverse_results[:n_results]
     
     def hybrid_search(self, query: str, n_results: int = 5, alpha: float = None) -> List[Dict]:
-        """Combines semantic and BM25 search"""
+        """Combined semantic + BM25 search"""
         if alpha is None:
             alpha = SEARCH.hybrid_alpha
         
         if not self.db_manager.documents_cache:
             return []
         
-        # Get semantic results (already in good range)
-        vector_results = self.db_manager.search(query, n_results=n_results * 2)
+        vector_results = self.db_manager.search(query, n_results=n_results * 3)
         
         if not vector_results:
             return []
         
-        # Get BM25 scores for all documents
         query_tokens = query.lower().split()
         bm25_scores = self.bm25.get_scores(query_tokens)
-        normalized_bm25 = self._percentile_normalize(bm25_scores)
+        normalized_bm25 = self.scorer.normalize_bm25(bm25_scores)
         
-        # Combine scores
         hybrid_results = []
         for result in vector_results:
             doc_idx = next(
@@ -116,31 +117,30 @@ class AdvancedSearchStrategies:
             if doc_idx is not None:
                 bm25_score = float(normalized_bm25[doc_idx])
                 vector_score = result['similarity_score']
+                hybrid_base_score = alpha * vector_score + (1 - alpha) * bm25_score
                 
-                # Weighted combination
-                hybrid_score = alpha * vector_score + (1 - alpha) * bm25_score
+                final_score = self.scorer.compute_final_score(
+                    base_score=hybrid_base_score,
+                    metadata=result['metadata'],
+                    query=query
+                )
                 
                 result['bm25_score'] = bm25_score
                 result['vector_score'] = vector_score
-                result['hybrid_score'] = hybrid_score
-                result['final_score'] = hybrid_score
+                result['hybrid_score'] = hybrid_base_score
+                result['final_score'] = final_score
                 hybrid_results.append(result)
         
-        # Sort by hybrid score
-        hybrid_results.sort(key=lambda x: x['hybrid_score'], reverse=True)
+        hybrid_results.sort(key=lambda x: x['final_score'], reverse=True)
+        diverse_results = self._diversify_results(hybrid_results)
         
-        # Update ranks
-        for i, result in enumerate(hybrid_results[:n_results], 1):
-            result['rank'] = i
-        
-        return hybrid_results[:n_results]
+        return diverse_results[:n_results]
     
     def mmr_search(self, query: str, n_results: int = 5, lambda_param: float = None) -> List[Dict]:
-        """Maximal Marginal Relevance for diverse results"""
+        """Maximal Marginal Relevance search for diversity"""
         if lambda_param is None:
             lambda_param = SEARCH.mmr_lambda
         
-        # Get more candidates than needed
         candidates = self.db_manager.search(
             query,
             n_results=min(n_results * SEARCH.mmr_candidates_multiplier, SEARCH.max_top_k)
@@ -149,35 +149,38 @@ class AdvancedSearchStrategies:
         if not candidates:
             return []
         
-        # Get embeddings for candidates
+        for candidate in candidates:
+            candidate['base_score'] = self.scorer.compute_final_score(
+                base_score=candidate['similarity_score'],
+                metadata=candidate['metadata'],
+                query=query
+            )
+        
         candidate_texts = [c['content'] for c in candidates]
-        candidate_embeddings = self.db_manager.embedding_model.encode_batch(candidate_texts)
+        candidate_embeddings = self.db_manager.embedding_model.encode_batch(
+            candidate_texts, show_progress=False
+        )
         
         selected = []
         selected_embeddings = []
         remaining = list(range(len(candidates)))
         
-        # Select first document (highest relevance)
         selected.append(0)
         selected_embeddings.append(candidate_embeddings[0])
         remaining.remove(0)
         
-        # Iteratively select diverse documents
         while len(selected) < n_results and remaining:
             best_score = -float('inf')
             best_idx = None
             
             for idx in remaining:
-                # Relevance score (already in good range)
-                relevance = candidates[idx]['similarity_score']
+                relevance = candidates[idx]['base_score']
                 
-                # Calculate max similarity to selected documents
                 candidate_emb = candidate_embeddings[idx].reshape(1, -1)
                 selected_embs = np.array(selected_embeddings)
                 similarities = cosine_similarity(candidate_emb, selected_embs)[0]
                 max_sim = float(np.max(similarities))
                 
-                # MMR score: balance relevance and diversity
                 mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
                 
                 if mmr_score > best_score:
@@ -189,19 +192,16 @@ class AdvancedSearchStrategies:
                 selected_embeddings.append(candidate_embeddings[best_idx])
                 remaining.remove(best_idx)
         
-        # Return selected documents
         mmr_results = [candidates[i] for i in selected]
-        for i, result in enumerate(mmr_results, 1):
-            result['mmr_score'] = result['similarity_score']
-            result['final_score'] = result['similarity_score']
-            result['rank'] = i
+        for result in mmr_results:
+            result['mmr_score'] = result['base_score']
+            result['final_score'] = result['base_score']
         
         return mmr_results
     
     def rerank_search(self, query: str, n_results: int = 5,
                      initial_results: Optional[List[Dict]] = None) -> List[Dict]:
-        """Cross-encoder reranking with calibrated score normalization"""
-        # Get initial candidates if not provided
+        """Cross-encoder reranking for high accuracy"""
         if initial_results is None:
             initial_results = self.db_manager.search(
                 query,
@@ -211,91 +211,103 @@ class AdvancedSearchStrategies:
         if not initial_results:
             return []
 
-        # Prepare pairs for cross-encoder
         pairs = [[query, result['content']] for result in initial_results]
-        
-        # Get reranking scores (uses cached model)
         raw_scores = self.cross_encoder.predict(pairs)
+        normalized_scores = self.scorer.normalize_cross_encoder_scores(raw_scores)
 
-        # CRITICAL FIX: Use percentile-based normalization instead of sigmoid
-        # This matches the score range of other techniques (typically 0.3-0.8)
-        normalized_scores = self._percentile_normalize(raw_scores, target_range=(0.2, 0.85))
-
-        # Assign scores
         for i, result in enumerate(initial_results):
             result['rerank_raw_score'] = float(raw_scores[i])
-            result['rerank_score'] = float(normalized_scores[i])
-            result['final_score'] = float(normalized_scores[i])
+            base_score = float(normalized_scores[i])
+            
+            final_score = self.scorer.compute_final_score(
+                base_score=base_score,
+                metadata=result['metadata'],
+                query=query
+            )
+            
+            result['rerank_score'] = base_score
+            result['final_score'] = final_score
 
-        # Sort by rerank score
-        reranked = sorted(initial_results, key=lambda x: x['rerank_score'], reverse=True)
+        reranked = sorted(initial_results, key=lambda x: x['final_score'], reverse=True)
+        diverse_results = self._diversify_results(reranked)
 
-        # Update ranks
-        for i, result in enumerate(reranked[:n_results], 1):
-            result['rank'] = i
-
-        return reranked[:n_results]
+        return diverse_results[:n_results]
     
-    def _percentile_normalize(self, scores: np.ndarray, 
-                             target_range: tuple = (0.2, 0.9)) -> np.ndarray:
+    def parallel_search(self, query: str, n_results: int = 5) -> List[Dict]:
         """
-        Percentile-based normalization for uniform score distribution
+        Execute multiple strategies in parallel and fuse with RRF
         
-        This method ensures scores from different techniques fall in similar ranges
-        by mapping the distribution to a target range while preserving relative ordering.
-        
-        Args:
-            scores: Raw scores to normalize
-            target_range: Desired output range (min, max)
-        
-        Returns:
-            Normalized scores in target_range
+        NEW: Uses Reciprocal Rank Fusion for true top-N ranking
         """
-        scores = np.array(scores, dtype=float)
+        strategies_to_run = {
+            'semantic': self.semantic_search,
+            'hybrid': self.hybrid_search,
+            'mmr': self.mmr_search,
+            'rerank': self.rerank_search
+        }
         
-        if len(scores) == 0:
-            return scores
+        strategy_results = {}
         
-        # Handle edge case where all scores are identical
-        if np.std(scores) < 1e-10:
-            mid_point = (target_range[0] + target_range[1]) / 2
-            return np.full_like(scores, mid_point)
+        # Execute strategies in parallel
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_strategy = {
+                executor.submit(strategy_func, query, n_results * 3): name
+                for name, strategy_func in strategies_to_run.items()
+            }
+            
+            for future in as_completed(future_to_strategy):
+                strategy_name = future_to_strategy[future]
+                try:
+                    results = future.result(timeout=30)
+                    strategy_results[strategy_name] = results
+                except Exception as e:
+                    print(f"   ⚠️  {strategy_name} failed: {e}")
+                    strategy_results[strategy_name] = []
         
-        # Use percentile rank to get uniform distribution
-        # This maps scores to [0, 1] based on their rank in the distribution
-        percentiles = np.zeros_like(scores)
-        sorted_indices = np.argsort(scores)
+        # Apply RRF fusion
+        if not any(strategy_results.values()):
+            return []
         
-        for rank, idx in enumerate(sorted_indices):
-            percentiles[idx] = rank / (len(scores) - 1) if len(scores) > 1 else 0.5
+        fused_results = self.fusion.reciprocal_rank_fusion(
+            strategy_results,
+            top_n=n_results
+        )
         
-        # Map percentiles to target range
-        min_score, max_score = target_range
-        normalized = min_score + percentiles * (max_score - min_score)
-        
-        return np.clip(normalized, target_range[0], target_range[1])
+        return fused_results
     
-    def _minmax_normalize(self, scores: np.ndarray, 
-                         target_range: tuple = (0.0, 1.0)) -> np.ndarray:
-        """Min-max normalization (kept for compatibility)"""
-        scores = np.array(scores)
+    def _diversify_results(self, results: List[Dict], threshold: float = 0.85) -> List[Dict]:
+        """Remove near-duplicate results using Jaccard similarity"""
+        if not results:
+            return results
         
-        if len(scores) == 0:
-            return scores
+        diverse_results = [results[0]]
         
-        min_score = np.min(scores)
-        max_score = np.max(scores)
+        for result in results[1:]:
+            is_diverse = True
+            result_words = set(result['content'].lower().split())
+            
+            for selected in diverse_results:
+                selected_words = set(selected['content'].lower().split())
+                
+                if not result_words or not selected_words:
+                    continue
+                
+                intersection = len(result_words & selected_words)
+                union = len(result_words | selected_words)
+                jaccard_sim = intersection / union if union > 0 else 0
+                
+                if jaccard_sim > threshold:
+                    is_diverse = False
+                    break
+            
+            if is_diverse:
+                diverse_results.append(result)
         
-        if max_score == min_score:
-            mid_point = (target_range[0] + target_range[1]) / 2
-            return np.full_like(scores, mid_point)
-        
-        normalized = (scores - min_score) / (max_score - min_score)
-        min_target, max_target = target_range
-        normalized = min_target + normalized * (max_target - min_target)
-        
-        return np.clip(normalized, target_range[0], target_range[1])
+        return diverse_results
+    
+    def _get_corpus_hash(self):
+        return len(self.db_manager.documents_cache)
     
     def invalidate_caches(self):
-        """Force rebuild of cached indices (call after adding documents)"""
+        """Clear caches when database changes"""
         self._bm25_corpus_hash = None

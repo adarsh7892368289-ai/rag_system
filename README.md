@@ -1,64 +1,73 @@
-# RAG System
+# Advanced RAG System
 
-A modular Retrieval-Augmented Generation (RAG) system with advanced search strategies, multi-format document processing, and intelligent query routing.
+A state-of-the-art Retrieval-Augmented Generation (RAG) system featuring ensemble chunking, parallel search strategies, and result fusion using Reciprocal Rank Fusion (RRF).
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Project Structure](#project-structure)
 - [Key Features](#key-features)
+- [Architecture](#architecture)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Usage Guide](#usage-guide)
-- [Configuration](#configuration)
 - [Search Strategies](#search-strategies)
+- [Ensemble Chunking](#ensemble-chunking)
+- [Result Fusion](#result-fusion)
+- [Configuration](#configuration)
+- [API Reference](#api-reference)
+- [Testing](#testing)
 - [Contributing](#contributing)
 - [License](#license)
 
 ## Overview
 
-This RAG system provides document ingestion, processing, and intelligent retrieval with support for multiple formats, 8 search strategies, and automatic query routing.
+This RAG system implements cutting-edge techniques for document processing and retrieval, combining multiple chunking strategies and search methods with robust result fusion.
 
-## Project Structure
+## Key Features
+
+- **Multi-Format Support**: Web pages, PDF, Word, Excel, PowerPoint, CSV, JSON, TXT
+- **Ensemble Chunking**: 4 strategies (sentence-aware, semantic, paragraph, fixed-size) with quality selection
+- **Parallel Search Strategies**: Semantic, Hybrid, BM25, MMR, Rerank, and Parallel fusion
+- **Result Fusion**: Reciprocal Rank Fusion (RRF) for combining multiple strategies
+- **Adaptive Scoring**: Quality-based chunk filtering and metadata boosting
+- **Intelligent Routing**: Automatic strategy selection based on query type
+- **Parallel Processing**: Concurrent document extraction and strategy execution
+
+## Architecture
 
 ```
 rag_system/
-├── core/                          # Core components
-│   ├── extraction.py             # Document extraction
-│   ├── chunking.py               # Text chunking strategies
-│   ├── embedding.py              # Embedding generation
-│   ├── database.py               # ChromaDB management
-│   └── document_processor.py     # Text processing
-├── strategies/                   # Search strategies
-│   ├── query_processor.py        # Query processing
-│   ├── search_engine.py          # Unified search engine
-│   └── search_strategies.py      # Individual strategies
-├── config/                       # Configuration
-│   ├── settings.py               # System settings
+├── core/                          # Core processing components
+│   ├── extraction.py             # Multi-format document extraction with ensemble chunking
+│   ├── chunking.py               # EnsembleChunker (4 strategies) + legacy DocumentChunker
+│   ├── embedding.py              # SentenceTransformer embeddings
+│   ├── database.py               # ChromaDB vector database
+│   └── document_processor.py     # Text processing utilities
+├── strategies/                   # Search and fusion strategies
+│   ├── search_strategies.py      # 6 advanced search strategies + parallel execution
+│   ├── query_router.py           # Intelligent query routing
+│   ├── fusion.py                 # Reciprocal Rank Fusion (RRF)
+│   └── __init__.py
+├── scoring/                      # Adaptive scoring system
+│   ├── scorer.py                 # UnifiedScorer with metadata boosting
+│   └── __init__.py
+├── config/                       # Configuration management
+│   ├── settings.py               # Comprehensive configuration
 │   └── __init__.py
 ├── utils/                        # Utilities
 │   └── helpers.py                # Helper functions
 ├── data/                         # Data storage (auto-created)
-├── pipeline.py                   # Main pipeline
-├── example_usage.py              # Usage examples
+│   ├── extracted/                # Saved extracted documents
+│   ├── chroma_db/                # Vector database
+│   └── models/                   # Cached models
+├── pipeline.py                   # Main RAG pipeline orchestrator
+├── example_usage.py              # Ensemble chunking test
+├── test_rrf.py                   # Result fusion validation
 ├── requirements.txt              # Dependencies
-├── README.md                     # This file
-└── .gitignore                    # Git ignore rules
+└── README.md                     # This file
 ```
-
-## Key Features
-
-- **Multi-Format Support**: PDF, Word, Excel, PowerPoint, CSV, JSON, TXT, HTML, Web pages
-- **8 Search Strategies**: Semantic, Hybrid, BM25, MMR, Rerank, Parallel, Fast, Accurate
-- **Auto-Routing**: Query type detection and optimal strategy selection
-- **Duplicate Handling**: Skip, replace, or merge document updates
-- **Parallel Processing**: Concurrent document extraction and processing
-- **Configurable Chunking**: Sentence-aware, semantic, paragraph, fixed-size methods
-- **Score Normalization**: Consistent 0-1 scoring across all strategies
-- **Search Technique Tracking**: Results include the search technique used for transparency
 
 ## Installation
 
@@ -69,31 +78,25 @@ rag_system/
 
 ### Install Dependencies
 
-1. Clone the repository:
 ```bash
 git clone <repository-url>
 cd rag-system
-```
-
-2. Install Python dependencies:
-```bash
 pip install -r requirements.txt
 ```
 
 ### Required Packages
 
 - `sentence-transformers>=2.2.2`: For embedding generation
-- `chromadb>=0.4.0`: Vector database for document storage
+- `chromadb>=0.4.0`: Vector database
 - `numpy>=1.24.0`: Numerical computations
 - `pandas>=2.0.0`: Data processing
 - `scikit-learn>=1.3.0`: Machine learning utilities
 - `rank-bm25>=0.2.2`: Keyword-based search
-- `requests>=2.31.0`: HTTP requests for web scraping
+- `requests>=2.31.0`: HTTP requests
 - `beautifulsoup4>=4.12.0`: HTML parsing
 - `lxml>=4.9.0`: XML processing
-- `pdfplumber>=0.10.0`: PDF text extraction
+- `PyPDF2>=3.0.0`: PDF text extraction
 - `python-docx>=0.8.11`: Word document processing
-- `python-pptx>=0.6.21`: PowerPoint processing
 - `openpyxl>=3.1.0`: Excel file handling
 
 ## Quick Start
@@ -106,188 +109,249 @@ from pipeline import RAGPipeline
 # Initialize the RAG system
 pipeline = RAGPipeline()
 
-# Define sources (URLs or file paths)
+# Ingest documents with ensemble chunking
 sources = [
     "https://en.wikipedia.org/wiki/Machine_learning",
     "path/to/your/document.pdf"
 ]
-
-# Ingest documents
 pipeline.ingest(sources, reset=True)
 
-# Search with auto-routing
+# Search with auto-routing and parallel strategies
 results = pipeline.query("What is machine learning?", top_k=5)
 
-# Print results
+# Results include fusion scores and strategy provenance
 for result in results:
     print(f"Score: {result['final_score']:.3f}")
-    print(f"Technique: {result['search_technique']}")
+    print(f"RRF Score: {result['fusion_score']:.6f}")
+    print(f"Confidence: {result['confidence']:.3f}")
+    print(f"Strategies: {result['strategies_used']}")
     print(f"Content: {result['content'][:200]}...")
     print("---")
 ```
 
-### Command Line Usage
+### Run Validation Tests
 
 ```bash
-# Run example usage
+# Test ensemble chunking
 python example_usage.py
+
+# Test result fusion (RRF)
+python test_rrf.py
 ```
 
 ## Usage Guide
 
 ### Document Ingestion
 
-#### Ingest from URLs and Files
+#### Ingest with Ensemble Chunking
 
 ```python
-# Initialize pipeline
 pipeline = RAGPipeline()
 
-# Define sources
+# Ensemble chunking automatically applies 4 strategies
 sources = [
     "https://example.com/article1",
-    "https://example.com/article2",
     "documents/research_paper.pdf",
     "data/dataset.xlsx"
 ]
 
-# Ingest with options
 pipeline.ingest(
     sources=sources,
-    reset=True,                    # Clear database before ingestion
-    save_extracted=True,           # Save extracted documents to JSON
-    update_mode='skip'             # 'skip', 'replace', or 'merge'
+    reset=True,                    # Clear database
+    save_extracted=True,           # Save to JSON
+    update_mode='skip'             # 'skip', 'replace', 'merge'
 )
 ```
 
-#### Load from Saved JSON Files
+#### Load from Saved Documents
 
 ```python
 # Load previously extracted documents
-pipeline.load_from_json(
-    folder_path='data/extracted',
-    reset=False,
-    update_mode='merge'
-)
+pipeline.load_from_json('data/extracted', reset=False)
 ```
 
 ### Querying
 
-#### Basic Search
+#### Auto-Routing Search
 
 ```python
-# Simple search with auto-routing
-results = pipeline.query("How do neural networks work?")
+# Automatically selects optimal strategy based on query type
+results = pipeline.query("How do neural networks work?")  # Routes to 'rerank'
+results = pipeline.query("machine learning algorithms")   # Routes to 'hybrid'
+results = pipeline.query("compare CNN and RNN")           # Routes to 'parallel'
 ```
 
-#### Advanced Search Options
+#### Manual Strategy Selection
 
 ```python
-# Manual mode selection
+# Force specific strategy
+results = pipeline.query("query", mode='parallel', auto_route=False)
+results = pipeline.query("query", mode='semantic', auto_route=False)
+results = pipeline.query("query", mode='rerank', auto_route=False)
+```
+
+#### Advanced Query Options
+
+```python
 results = pipeline.query(
-    query="machine learning algorithms",
+    query="complex technical question",
     top_k=10,
-    mode='hybrid',        # 'semantic', 'hybrid', 'bm25', 'mmr', 'rerank', etc.
-    auto_route=False      # Disable auto-routing
+    mode='parallel',       # Use all strategies with RRF fusion
+    auto_route=False
 )
 
-# Search with specific mode
-results = pipeline.query(
-    query="compare deep learning frameworks",
-    mode='parallel'       # Multi-strategy fusion
-)
-```
-
-#### Different Query Types
-
-```python
-# How-to questions (routes to 'rerank')
-results = pipeline.query("How to implement word embeddings?")
-
-# Definition questions (routes to 'semantic')
-results = pipeline.query("What is supervised learning?")
-
-# Comparison questions (routes to 'parallel')
-results = pipeline.query("Compare CNN and RNN architectures")
-
-# Keyword queries (routes to 'hybrid')
-results = pipeline.query("neural network backpropagation")
+# Results include fusion metadata
+for result in results:
+    fusion_score = result['fusion_score']      # RRF score
+    confidence = result['confidence']          # Strategy agreement
+    strategies = result['strategies_used']     # Which strategies found it
+    ranks = result['strategy_ranks']          # Rank in each strategy
 ```
 
 ### Database Management
 
 ```python
-# Get system statistics
+# Get statistics
 stats = pipeline.get_stats()
 print(f"Documents: {stats['count']}")
 
 # Clear database
 pipeline.clear_database()
-
-# Get all document IDs
-ids = pipeline.db_manager.get_all_ids()
 ```
+
+## Search Strategies
+
+The system implements 6 search strategies, executed in parallel for optimal results:
+
+### 1. Semantic Search (`semantic`)
+
+Pure vector similarity using embeddings. Fast and effective for conceptual queries.
+
+### 2. BM25 Search (`bm25`)
+
+Keyword-based search using BM25 algorithm. Excellent for exact term matching.
+
+### 3. Hybrid Search (`hybrid`)
+
+Combines semantic and BM25 with configurable weights (default: 70% semantic, 30% keyword).
+
+### 4. MMR Search (`mmr`)
+
+Maximal Marginal Relevance for diverse results. Balances relevance vs. diversity.
+
+### 5. Rerank Search (`rerank`)
+
+Cross-encoder reranking for high accuracy. Best for complex understanding.
+
+### 6. Parallel Search (`parallel`) - **DEFAULT**
+
+Executes all 4 strategies (semantic, hybrid, mmr, rerank) in parallel and fuses results using Reciprocal Rank Fusion (RRF).
+
+```python
+# Parallel search with RRF fusion
+results = pipeline.query("complex query", mode='parallel')
+```
+
+## Ensemble Chunking
+
+The system uses **EnsembleChunker** to apply multiple chunking strategies and select the best chunks:
+
+### 4 Chunking Strategies
+
+1. **Sentence-Aware**: Respects sentence boundaries with overlap
+2. **Semantic**: Chunks based on semantic similarity between sentences
+3. **Paragraph**: Uses paragraph boundaries as natural breaks
+4. **Fixed-Size**: Fixed word count with configurable overlap
+
+### Ensemble Process
+
+1. **Parallel Execution**: All 4 strategies run simultaneously
+2. **Deduplication**: Removes near-duplicate chunks using Jaccard similarity
+3. **Quality Scoring**: Each chunk scored on length, keywords, coherence, information density
+4. **Best Selection**: Top N chunks selected ensuring document coverage
+
+### Benefits
+
+- **Better Quality**: Combines strengths of multiple approaches
+- **Document Coverage**: Ensures important sections are captured
+- **Adaptive**: Works across different document types and domains
+
+```python
+# Ensemble chunking is used automatically in extraction
+extractor = DocumentExtractor(use_ensemble=True)  # Default: True
+```
+
+## Result Fusion
+
+The system uses **Reciprocal Rank Fusion (RRF)** to combine results from multiple search strategies:
+
+### RRF Algorithm
+
+```
+RRF Score = Σ(1 / (k + rank_in_strategy_i))
+```
+
+- **k = 60**: Standard RRF constant
+- **True Top-N**: Global ranking across all strategies
+- **Robust**: Less sensitive to individual strategy biases
+
+### Fusion Features
+
+- **Provenance Tracking**: Which strategies found each result
+- **Confidence Scoring**: Based on strategy agreement and coverage
+- **Diversity**: MMR applied to prevent duplicate results
+- **Parallel Execution**: All strategies run concurrently
+
+### Confidence Calculation
+
+```
+Confidence = 0.40 × Coverage + 0.30 × Quality + 0.30 × Agreement
+```
+
+- **Coverage**: How many strategies found the result
+- **Quality**: Average rank position across strategies
+- **Agreement**: Consistency of ranking across strategies
 
 ## Configuration
 
-The system uses a modular configuration system located in `config/settings.py`.
+Comprehensive configuration in `config/settings.py`:
 
-### Extraction Configuration
-
-```python
-EXTRACTION = ExtractionConfig(
-    supported_formats=['.pdf', '.docx', '.pptx', '.xlsx', '.csv', '.txt', '.json', '.html'],
-    timeout=30,                    # Request timeout in seconds
-    max_workers=4,                 # Parallel processing workers
-    user_agent='Mozilla/5.0...',   # User agent for web requests
-    output_dir='data/extracted'    # Directory for saved documents
-)
-```
-
-### Chunking Configuration
+### Core Settings
 
 ```python
+# Chunking configuration
 CHUNKING = ChunkingConfig(
-    method='sentence_aware',       # 'sentence_aware', 'semantic', 'paragraph', 'fixed_size'
+    method='sentence_aware',       # Primary method for legacy chunker
     target_words=300,              # Target chunk size
     overlap_words=50,              # Overlap between chunks
-    min_chunk_words=30,            # Minimum chunk size
-    max_chunk_words=500,           # Maximum chunk size
     similarity_threshold=0.3       # Semantic similarity threshold
 )
-```
 
-### Embedding Configuration
-
-```python
-EMBEDDING = EmbeddingConfig(
-    model_name='all-MiniLM-L6-v2',  # SentenceTransformer model
-    batch_size=32,                  # Batch size for encoding
-    normalize_embeddings=True,      # Normalize embeddings
-    device='cpu',                   # 'cpu' or 'cuda'
-    cache_dir='data/models'         # Model cache directory
+# Search configuration
+SEARCH = SearchConfig(
+    default_mode='parallel',       # Default search mode
+    hybrid_alpha=0.7,              # Semantic:keyword weight ratio
+    mmr_lambda=0.7,                # Relevance:diversity balance
+    rerank_model='cross-encoder/ms-marco-MiniLM-L-12-v2'
 )
 ```
 
-### Search Configuration
+### Advanced Options
 
 ```python
-SEARCH = SearchConfig(
-    default_mode='parallel',        # Default search mode
-    confidence_thresholds={         # Score thresholds by mode
-        'parallel': 0.15,
-        'fast': 0.25,
-        'accurate': 0.30,
-        'semantic': 0.25,
-        'hybrid': 0.20,
-        'bm25': 0.10,
-        'mmr': 0.25,
-        'rerank': 0.40
-    },
-    hybrid_alpha=0.7,               # Hybrid search weight (semantic:keyword)
-    mmr_lambda=0.7,                 # MMR diversity weight
-    rerank_model='cross-encoder/ms-marco-MiniLM-L-6-v-2',
-    enable_reranking=True
+# Extraction settings
+EXTRACTION = ExtractionConfig(
+    supported_formats=['.pdf', '.docx', '.pptx', '.xlsx', '.csv', '.txt', '.json', '.html'],
+    timeout=30,                    # Request timeout
+    max_workers=4,                 # Parallel processing workers
+    user_agent='Mozilla/5.0...'    # User agent for web scraping
+)
+
+# Database settings
+DATABASE = DatabaseConfig(
+    persist_directory='data/chroma_db',
+    collection_name='rag_documents',
+    batch_size=100
 )
 ```
 
@@ -295,176 +359,147 @@ SEARCH = SearchConfig(
 
 ### RAGPipeline
 
-Main pipeline class for document processing and search.
+Main pipeline orchestrator:
 
-#### Methods
-
-- `__init__()`: Initialize the RAG pipeline
-- `ingest(sources, reset, save_extracted, update_mode)`: Ingest documents from sources
-- `load_from_json(folder_path, reset, update_mode)`: Load documents from JSON files
-- `query(query_text, top_k, mode, auto_route)`: Search for documents
-- `clear_database()`: Clear all documents from database
-- `get_stats()`: Get system statistics
+```python
+class RAGPipeline:
+    def __init__(self, verbose=True)
+    def ingest(self, sources, reset, save_extracted, update_mode)
+    def load_from_json(self, folder_path, reset, update_mode)
+    def query(self, query_text, top_k, mode, auto_route)
+    def query_batch(self, queries, top_k, mode, auto_route, max_workers)
+    def build_llm_context(self, results, max_tokens, include_metadata, min_confidence)
+    def format_for_llm(self, query, context_dict, system_prompt)
+    def clear_database(self)
+    def get_stats(self)
+```
 
 ### DocumentExtractor
 
-Handles document extraction from various sources.
+Multi-format document extraction:
 
-#### Methods
+```python
+class DocumentExtractor:
+    def __init__(self, use_ensemble=True)  # Default: ensemble chunking
+    def extract_multiple(self, sources, chunk, parallel)
+    def save_documents(self, documents)
+    def load_from_folder(self, folder_path)
+```
 
-- `extract_multiple(sources, chunk, parallel)`: Extract from multiple sources
-- `save_documents(documents)`: Save extracted documents to JSON
+### EnsembleChunker
 
-### DocumentChunker
+Advanced chunking with multiple strategies:
 
-Intelligent text chunking with multiple strategies.
-
-#### Methods
-
-- `chunk(text, method)`: Chunk text using specified method
-
-### EmbeddingGenerator
-
-Embedding generation using SentenceTransformers.
-
-#### Methods
-
-- `encode(text)`: Generate embedding for single text
-- `encode_batch(texts)`: Generate embeddings for multiple texts
-
-### ChromaDBManager
-
-Vector database management with ChromaDB.
-
-#### Methods
-
-- `initialize(reset)`: Initialize database connection
-- `add_documents(documents, update_mode)`: Add documents with duplicate handling
-- `search(query, n_results)`: Search for similar documents
+```python
+class EnsembleChunker:
+    def chunk_with_ensemble(self, text, max_chunks=20)
+    # Internal methods for each strategy
+```
 
 ### AdvancedSearchStrategies
 
-Implements various search strategies.
-
-#### Methods
-
-- `semantic_search(query, n_results)`: Pure vector similarity search
-- `bm25_search(query, n_results)`: Keyword-based search
-- `hybrid_search(query, n_results, alpha)`: Combined semantic + keyword search
-- `mmr_search(query, n_results, lambda_param)`: Maximal Marginal Relevance
-- `rerank_search(query, n_results)`: Cross-encoder reranking
-
-## Search Strategies
-
-### 1. Semantic Search (`semantic`)
-Pure vector similarity search using embeddings. Fast and good for conceptual queries.
+Search strategy implementations:
 
 ```python
-results = pipeline.query("machine learning basics", mode='semantic')
+class AdvancedSearchStrategies:
+    def semantic_search(self, query, n_results)
+    def bm25_search(self, query, n_results)
+    def hybrid_search(self, query, n_results, alpha)
+    def mmr_search(self, query, n_results, lambda_param)
+    def rerank_search(self, query, n_results)
+    def parallel_search(self, query, n_results)  # RRF fusion
 ```
 
-### 2. BM25 Search (`bm25`)
-Keyword-based search using BM25 algorithm. Good for exact term matching.
+### ResultFusion
+
+Reciprocal Rank Fusion implementation:
 
 ```python
-results = pipeline.query("neural network architecture", mode='bm25')
+class ResultFusion:
+    def reciprocal_rank_fusion(self, strategy_results, top_n)
+    def deduplicate_results(self, results, threshold)
 ```
 
-### 3. Hybrid Search (`hybrid`)
-Combines semantic and BM25 search with configurable weights.
+### UnifiedScorer
+
+Adaptive scoring system:
 
 ```python
-results = pipeline.query("deep learning applications", mode='hybrid')
+class UnifiedScorer:
+    def normalize_bm25(self, scores)
+    def normalize_cross_encoder_scores(self, scores)
+    def compute_final_score(self, base_score, metadata, query, result_pool)
+    def calculate_metadata_boost(self, metadata, query, result_pool)
 ```
 
-### 4. MMR Search (`mmr`)
-Maximal Marginal Relevance for diverse results. Balances relevance and diversity.
+## Testing
 
-```python
-results = pipeline.query("AI techniques", mode='mmr')
+The system includes comprehensive validation tests:
+
+### Run Tests
+
+```bash
+# Test ensemble chunking
+python example_usage.py
+
+# Test result fusion (RRF)
+python test_rrf.py
 ```
 
-### 5. Rerank Search (`rerank`)
-Uses cross-encoder for high-accuracy reranking of initial candidates.
+### Test Coverage
 
-```python
-results = pipeline.query("how transformers work", mode='rerank')
-```
+- **Ensemble Chunking**: Validates all 4 strategies, deduplication, quality scoring
+- **Result Fusion**: Tests RRF implementation, provenance tracking, confidence scoring
+- **Parallel Execution**: Validates concurrent strategy execution
+- **Quality Assurance**: Score validation, keyword extraction, metadata integrity
 
-### 6. Parallel Search (`parallel`)
-Executes multiple strategies in parallel and fuses results using RRF.
+### Test Results
 
-```python
-results = pipeline.query("complex query", mode='parallel')
-```
+Expected output includes:
 
-### 7. Fast Search (`fast`)
-Optimized semantic search for speed.
-
-```python
-results = pipeline.query("quick lookup", mode='fast')
-```
-
-### 8. Accurate Search (`accurate`)
-High-accuracy search using hybrid + reranking.
-
-```python
-results = pipeline.query("detailed explanation needed", mode='accurate')
-```
-
-### Auto-Routing
-
-The system automatically routes queries based on type:
-
-- **How-to questions** → `rerank` (complex understanding)
-- **Definition questions** → `semantic` (conceptual similarity)
-- **Comparison questions** → `parallel` (multiple perspectives)
-- **List questions** → `mmr` (diversity important)
-- **Keyword queries** → `hybrid` (balance keyword + semantic)
-- **General questions** → `parallel` (best overall performance)
+- ✅ All scores ≤ 1.0
+- ✅ Quality scores present
+- ✅ Multiple strategies executed
+- ✅ Keywords are real words (≥4 characters)
+- ✅ RRF scores decrease monotonically
+- ✅ Confidence scores calculated
+- ✅ No duplicate results
 
 ## Contributing
 
-We welcome contributions! Please follow these guidelines:
-
 ### Development Setup
 
-1. Fork the repository
-2. Create a virtual environment:
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. Install development dependencies:
-```bash
+git clone <repository-url>
+cd rag-system
 pip install -r requirements.txt
 ```
 
 ### Code Style
 
-- Follow PEP 8 style guidelines
-- Use type hints for function parameters and return values
-- Add docstrings to all classes and methods
+- Follow PEP 8 guidelines
+- Use type hints
+- Add comprehensive docstrings
 - Write descriptive commit messages
 
 ### Testing
 
 ```bash
-# Run tests
-python -m pytest
+# Run specific tests
+python example_usage.py
+python test_rrf.py
 
-# Run with coverage
-python -m pytest --cov=rag_system
+# Add new tests for new features
 ```
 
 ### Pull Request Process
 
-1. Create a feature branch from `main`
-2. Make your changes with tests
-3. Ensure all tests pass
-4. Update documentation if needed
-5. Submit a pull request with a clear description
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Ensure all tests pass
+5. Update documentation
+6. Submit pull request
 
 ## License
 
@@ -472,4 +507,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Note**: This system is designed for research and development purposes. For production use, consider additional security measures, error handling, and performance optimizations.
+**Note**: This system represents a production-ready RAG implementation with state-of-the-art techniques for document processing and retrieval. The ensemble chunking and result fusion features provide significant improvements over single-strategy approaches.

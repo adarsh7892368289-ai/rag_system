@@ -1,12 +1,26 @@
+
+# Core ML/NLP
 sentence-transformers>=2.2.2
+torch>=2.0.0,<2.5.0
+transformers>=4.30.0,<4.45.0
+
+# Vector Database
 chromadb>=0.4.0
+
+# Data Processing
 numpy>=1.24.0
 pandas>=2.0.0
+
+# ML Utilities
 scikit-learn>=1.3.0
 rank-bm25>=0.2.2
+
+# Web Scraping
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
+
+# Document Processing
 pdfplumber>=0.10.0
 python-docx>=0.8.11
 python-pptx>=0.6.21

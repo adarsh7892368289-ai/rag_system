@@ -19,6 +19,7 @@ class ChunkingConfig:
     min_chunk_words = 30
     max_chunk_words = 500
     similarity_threshold = 0.3
+    max_chunks_per_document = 20  
 
 @dataclass
 class EmbeddingConfig:
