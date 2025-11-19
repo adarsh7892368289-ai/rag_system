@@ -16,8 +16,8 @@ class AdvancedSearchStrategies:
         self.scorer = UnifiedScorer()
         self.fusion = ResultFusion(db_manager.embedding_model)
         self._cross_encoder = None
-        self._bm25_index = None
-        self._bm25_corpus_hash = None
+        self._bm25_indices = {}
+        self._bm25_corpus_hashes = {}
     
     @property
     def cross_encoder(self):
@@ -25,21 +25,20 @@ class AdvancedSearchStrategies:
             self._cross_encoder = CrossEncoder(SEARCH.rerank_model)
         return self._cross_encoder
     
-    @property
-    def bm25(self):
-        current_hash = self._get_corpus_hash()
+    def get_bm25(self, strategy: str):
+        current_hash = len(self.db_manager.documents_cache.get(strategy, []))
         
-        if self._bm25_index is None or self._bm25_corpus_hash != current_hash:
-            corpus = [doc['content'] for doc in self.db_manager.documents_cache]
-            tokenized_corpus = [doc.lower().split() for doc in corpus]
-            self._bm25_index = BM25Okapi(tokenized_corpus)
-            self._bm25_corpus_hash = current_hash
+        if strategy not in self._bm25_indices or self._bm25_corpus_hashes.get(strategy) != current_hash:
+            corpus = [doc['content'] for doc in self.db_manager.documents_cache.get(strategy, [])]
+            if corpus:
+                tokenized_corpus = [doc.lower().split() for doc in corpus]
+                self._bm25_indices[strategy] = BM25Okapi(tokenized_corpus)
+                self._bm25_corpus_hashes[strategy] = current_hash
         
-        return self._bm25_index
+        return self._bm25_indices.get(strategy)
     
-    def semantic_search(self, query: str, n_results: int = 5) -> List[Dict]:
-        """Pure vector similarity search"""
-        raw_results = self.db_manager.search(query, n_results=n_results * 2)
+    def semantic_search(self, query: str, strategy: str, n_results: int = 5) -> List[Dict]:
+        raw_results = self.db_manager.search(query, strategy, n_results=n_results * 2)
         
         for result in raw_results:
             result['final_score'] = self.scorer.compute_final_score(
@@ -47,26 +46,31 @@ class AdvancedSearchStrategies:
                 metadata=result['metadata'],
                 query=query
             )
+            result['search_strategy'] = 'semantic'
         
         raw_results.sort(key=lambda x: x['final_score'], reverse=True)
         diverse_results = self._diversify_results(raw_results)
         
         return diverse_results[:n_results]
     
-    def bm25_search(self, query: str, n_results: int = 5) -> List[Dict]:
-        """Keyword-based search using BM25"""
-        if not self.db_manager.documents_cache:
+    def bm25_search(self, query: str, strategy: str, n_results: int = 5) -> List[Dict]:
+        cache = self.db_manager.documents_cache.get(strategy, [])
+        if not cache:
+            return []
+        
+        bm25 = self.get_bm25(strategy)
+        if not bm25:
             return []
         
         query_tokens = query.lower().split()
-        bm25_scores = self.bm25.get_scores(query_tokens)
+        bm25_scores = bm25.get_scores(query_tokens)
         normalized_scores = self.scorer.normalize_bm25(bm25_scores)
         
         top_indices = np.argsort(bm25_scores)[::-1][:n_results * 2]
         
         results = []
         for idx in top_indices:
-            doc = self.db_manager.documents_cache[idx]
+            doc = cache[idx]
             base_score = float(normalized_scores[idx])
             
             final_score = self.scorer.compute_final_score(
@@ -81,7 +85,9 @@ class AdvancedSearchStrategies:
                 'metadata': doc.get('metadata', {}),
                 'bm25_score': base_score,
                 'final_score': final_score,
-                'query': query
+                'query': query,
+                'chunking_strategy': strategy,
+                'search_strategy': 'bm25'
             })
         
         results.sort(key=lambda x: x['final_score'], reverse=True)
@@ -89,28 +95,31 @@ class AdvancedSearchStrategies:
         
         return diverse_results[:n_results]
     
-    def hybrid_search(self, query: str, n_results: int = 5, alpha: float = None) -> List[Dict]:
-        """Combined semantic + BM25 search"""
+    def hybrid_search(self, query: str, strategy: str, n_results: int = 5, alpha: float = None) -> List[Dict]:
         if alpha is None:
             alpha = SEARCH.hybrid_alpha
         
-        if not self.db_manager.documents_cache:
+        cache = self.db_manager.documents_cache.get(strategy, [])
+        if not cache:
             return []
         
-        vector_results = self.db_manager.search(query, n_results=n_results * 3)
+        vector_results = self.db_manager.search(query, strategy, n_results=n_results * 3)
         
         if not vector_results:
             return []
         
+        bm25 = self.get_bm25(strategy)
+        if not bm25:
+            return vector_results[:n_results]
+        
         query_tokens = query.lower().split()
-        bm25_scores = self.bm25.get_scores(query_tokens)
+        bm25_scores = bm25.get_scores(query_tokens)
         normalized_bm25 = self.scorer.normalize_bm25(bm25_scores)
         
         hybrid_results = []
         for result in vector_results:
             doc_idx = next(
-                (i for i, doc in enumerate(self.db_manager.documents_cache)
-                 if doc['id'] == result['id']),
+                (i for i, doc in enumerate(cache) if doc['id'] == result['id']),
                 None
             )
             
@@ -129,6 +138,7 @@ class AdvancedSearchStrategies:
                 result['vector_score'] = vector_score
                 result['hybrid_score'] = hybrid_base_score
                 result['final_score'] = final_score
+                result['search_strategy'] = 'hybrid'
                 hybrid_results.append(result)
         
         hybrid_results.sort(key=lambda x: x['final_score'], reverse=True)
@@ -136,13 +146,13 @@ class AdvancedSearchStrategies:
         
         return diverse_results[:n_results]
     
-    def mmr_search(self, query: str, n_results: int = 5, lambda_param: float = None) -> List[Dict]:
-        """Maximal Marginal Relevance search for diversity"""
+    def mmr_search(self, query: str, strategy: str, n_results: int = 5, lambda_param: float = None) -> List[Dict]:
         if lambda_param is None:
             lambda_param = SEARCH.mmr_lambda
         
         candidates = self.db_manager.search(
             query,
+            strategy,
             n_results=min(n_results * SEARCH.mmr_candidates_multiplier, SEARCH.max_top_k)
         )
         
@@ -155,6 +165,7 @@ class AdvancedSearchStrategies:
                 metadata=candidate['metadata'],
                 query=query
             )
+            candidate['search_strategy'] = 'mmr'
         
         candidate_texts = [c['content'] for c in candidates]
         candidate_embeddings = self.db_manager.embedding_model.encode_batch(
@@ -199,12 +210,12 @@ class AdvancedSearchStrategies:
         
         return mmr_results
     
-    def rerank_search(self, query: str, n_results: int = 5,
+    def rerank_search(self, query: str, strategy: str, n_results: int = 5,
                      initial_results: Optional[List[Dict]] = None) -> List[Dict]:
-        """Cross-encoder reranking for high accuracy"""
         if initial_results is None:
             initial_results = self.db_manager.search(
                 query,
+                strategy,
                 n_results=min(SEARCH.rerank_top_k, SEARCH.max_top_k)
             )
 
@@ -227,31 +238,26 @@ class AdvancedSearchStrategies:
             
             result['rerank_score'] = base_score
             result['final_score'] = final_score
+            result['search_strategy'] = 'rerank'
 
         reranked = sorted(initial_results, key=lambda x: x['final_score'], reverse=True)
         diverse_results = self._diversify_results(reranked)
 
         return diverse_results[:n_results]
     
-    def parallel_search(self, query: str, n_results: int = 5) -> List[Dict]:
-        """
-        Execute multiple strategies in parallel and fuse with RRF
-        
-        NEW: Uses Reciprocal Rank Fusion for true top-N ranking
-        """
+    def parallel_search_single_strategy(self, query: str, chunking_strategy: str, n_results: int = 5) -> List[Dict]:
         strategies_to_run = {
-            'semantic': self.semantic_search,
-            'hybrid': self.hybrid_search,
-            'mmr': self.mmr_search,
-            'rerank': self.rerank_search
+            'semantic': lambda: self.semantic_search(query, chunking_strategy, n_results * 3),
+            'hybrid': lambda: self.hybrid_search(query, chunking_strategy, n_results * 3),
+            'mmr': lambda: self.mmr_search(query, chunking_strategy, n_results * 3),
+            'rerank': lambda: self.rerank_search(query, chunking_strategy, n_results * 3)
         }
         
         strategy_results = {}
         
-        # Execute strategies in parallel
         with ThreadPoolExecutor(max_workers=4) as executor:
             future_to_strategy = {
-                executor.submit(strategy_func, query, n_results * 3): name
+                executor.submit(strategy_func): name
                 for name, strategy_func in strategies_to_run.items()
             }
             
@@ -261,10 +267,8 @@ class AdvancedSearchStrategies:
                     results = future.result(timeout=30)
                     strategy_results[strategy_name] = results
                 except Exception as e:
-                    print(f"   ⚠️  {strategy_name} failed: {e}")
                     strategy_results[strategy_name] = []
         
-        # Apply RRF fusion
         if not any(strategy_results.values()):
             return []
         
@@ -273,10 +277,66 @@ class AdvancedSearchStrategies:
             top_n=n_results
         )
         
+        for result in fused_results:
+            result['chunking_strategy'] = chunking_strategy
+        
         return fused_results
     
+    def parallel_search_all(self, query: str, n_results: int = 5) -> Dict[str, List[Dict]]:
+        chunking_strategies = ['sentence_aware', 'semantic', 'paragraph', 'fixed_size']
+        
+        all_chunking_results = {}
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_chunking = {
+                executor.submit(self.parallel_search_single_strategy, query, strategy, n_results * 2): strategy
+                for strategy in chunking_strategies
+            }
+            
+            for future in as_completed(future_to_chunking):
+                chunking_strategy = future_to_chunking[future]
+                try:
+                    results = future.result(timeout=60)
+                    all_chunking_results[chunking_strategy] = results
+                except Exception as e:
+                    print(f"   ⚠️  {chunking_strategy} search failed: {e}")
+                    all_chunking_results[chunking_strategy] = []
+        
+        return all_chunking_results
+    
+    def single_strategy_all_chunking(self, query: str, search_strategy: str, n_results: int = 5) -> Dict[str, List[Dict]]:
+        chunking_strategies = ['sentence_aware', 'semantic', 'paragraph', 'fixed_size']
+        
+        strategy_map = {
+            'semantic': self.semantic_search,
+            'bm25': self.bm25_search,
+            'hybrid': self.hybrid_search,
+            'mmr': self.mmr_search,
+            'rerank': self.rerank_search
+        }
+        
+        search_func = strategy_map.get(search_strategy, self.semantic_search)
+        
+        all_chunking_results = {}
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_chunking = {
+                executor.submit(search_func, query, chunking, n_results * 2): chunking
+                for chunking in chunking_strategies
+            }
+            
+            for future in as_completed(future_to_chunking):
+                chunking_strategy = future_to_chunking[future]
+                try:
+                    results = future.result(timeout=30)
+                    all_chunking_results[chunking_strategy] = results
+                except Exception as e:
+                    print(f"   ⚠️  {chunking_strategy} failed: {e}")
+                    all_chunking_results[chunking_strategy] = []
+        
+        return all_chunking_results
+    
     def _diversify_results(self, results: List[Dict], threshold: float = 0.85) -> List[Dict]:
-        """Remove near-duplicate results using Jaccard similarity"""
         if not results:
             return results
         
@@ -305,9 +365,5 @@ class AdvancedSearchStrategies:
         
         return diverse_results
     
-    def _get_corpus_hash(self):
-        return len(self.db_manager.documents_cache)
-    
     def invalidate_caches(self):
-        """Clear caches when database changes"""
-        self._bm25_corpus_hash = None
+        self._bm25_corpus_hashes = {}
