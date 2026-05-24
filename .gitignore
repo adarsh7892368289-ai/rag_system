@@ -195,6 +195,9 @@ transformers_cache/
 *.temp
 .scrapy_cache/
 
+# VS Code Copilot local artifacts
+.claude/
+
 # Downloaded web content
 downloads/
 scraped_data/
